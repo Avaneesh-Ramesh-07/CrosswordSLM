@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Skill(deep-research)",
+      "Skill(deep-research:*)",
+      "WebFetch(domain:aclanthology.org)",
+      "WebFetch(domain:arxiv.org)"
+    ]
+  }
+}
