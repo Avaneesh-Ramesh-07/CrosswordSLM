@@ -52,6 +52,10 @@ def make_draws(spec: Spec, word_source, n_draws=1, seed=0, cap=None):
     (e.g. an open word square), so the strong anti-hardcode gate lives at
     dataset-harvest time on genuinely different word sources, not here.
     """
+    if isinstance(word_source, dict):
+        # theme+fill contract: pass the structured source straight to the generator
+        # (fuzz_verify flattens theme+fill for the scorer).
+        return [(spec, word_source) for _ in range(n_draws)]
     ws = list(word_source)
     targets = list(spec.topic_words)
     use_full = cap is None or cap >= len(ws)
@@ -112,9 +116,12 @@ def evaluate_code(code: str, spec: Spec, word_source, scores=None, n_draws=1, se
 def _load_problem(path):
     with open(path, encoding="utf-8") as fh:
         p = json.load(fh)
+    # theme+fill contract: topic_words = the theme vocabulary (what coverage rewards)
+    theme = p.get("theme")
+    topic_words = theme if theme is not None else p.get("topic_words", ())
     spec = Spec(
         size=p["size"],
-        topic_words=tuple(p.get("topic_words", ())),
+        topic_words=tuple(topic_words),
         require_symmetry=p.get("require_symmetry", True),
         min_word_len=p.get("min_word_len", 3),
         time_budget_s=p.get("time_budget_s", 5.0),
@@ -144,9 +151,14 @@ def evaluate(program_path):
     with open(program_path, encoding="utf-8") as fh:
         code = fh.read()
 
+    theme = problem.get("theme")
+    if theme is not None:
+        word_source = {"theme": theme, "fill": problem.get("fill", [])}
+    else:
+        word_source = problem["word_source"]
     out = evaluate_code(
         code, spec,
-        word_source=problem["word_source"],
+        word_source=word_source,
         scores=problem.get("scores"),
         n_draws=problem.get("n_draws", 1),
         seed=problem.get("seed", 0),

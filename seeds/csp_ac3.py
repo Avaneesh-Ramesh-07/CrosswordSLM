@@ -211,6 +211,8 @@ def _build_layout(white, size, slots, assignment):
 def generate_crossword(topic, word_source, size):
     deadline = time.perf_counter() + 4.0
     rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
+    if isinstance(word_source, dict):  # theme+fill contract: this baseline just fills from both
+        word_source = list(word_source.get("theme", [])) + list(word_source.get("fill", []))
     idx = _index_by_length(word_source)
     for _ in range(200):  # fail fast per structure, try many structures within the deadline
         if time.perf_counter() > deadline:

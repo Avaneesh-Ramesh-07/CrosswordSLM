@@ -1,0 +1,1 @@
+"""CrossWordBench-derived evaluation harness."""

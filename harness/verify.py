@@ -27,9 +27,13 @@ def fuzz_verify(code: str, draws, dictionary=None, timeout_s: float = 5.0, mem_m
     """
     results = []
     for i, (spec, word_source) in enumerate(draws):
+        # word_source may be a flat list OR the theme+fill dict. The generator gets
+        # it as-is; the scorer gets the flat theme+fill union for validity.
+        is_dict = isinstance(word_source, dict)
+        gen_ws = word_source if is_dict else list(word_source)
         run = run_candidate(
             code,
-            {"topic": _draw_topic(spec), "word_source": list(word_source), "size": spec.size, "seed": i},
+            {"topic": _draw_topic(spec), "word_source": gen_ws, "size": spec.size, "seed": i},
             timeout_s=timeout_s,
             mem_mb=mem_mb,
         )
@@ -39,7 +43,8 @@ def fuzz_verify(code: str, draws, dictionary=None, timeout_s: float = 5.0, mem_m
                 "runtime_s": run["runtime_s"], "reasons": [run["status"]],
             })
             continue
-        sc = score(run["result"], spec, word_source, dictionary=dictionary,
+        flat = (word_source.get("theme", []) + word_source.get("fill", [])) if is_dict else word_source
+        sc = score(run["result"], spec, flat, dictionary=dictionary,
                    runtime_s=run["runtime_s"], scores=scores)
         results.append({"status": "ok", "runtime_s": run["runtime_s"], **sc})
 

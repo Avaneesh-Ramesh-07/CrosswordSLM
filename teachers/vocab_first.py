@@ -1,44 +1,45 @@
-"""Reference fixed-grid crossword generator (seed v1).
+"""Teacher generator: VOCAB-FIRST fill (maximizes coverage).
 
-Clean-license reimplementation of the canonical CSP pattern (à la CS50 / qxw):
-  1. construct a 180-degree symmetric grid whose white runs are all length >= 3
-     and fully connected (so it is "all-checked" and NYT-legal);
-  2. fill every slot from the supplied `word_source` via backtracking search with
-     MRV slot ordering + forward checking, choosing among the top-k candidates at
-     random (with restarts) to escape dead ends.
+The education behavior we want to teach: actually PLACE the target vocabulary,
+not just fill a legal grid. This generator receives a structured word source
+    word_source = {"theme": [SAT words to feature], "fill": [common connectors]}
+and, at every slot, tries THEME words before fill words. Backtracking keeps the
+grid valid; the theme-first ordering packs in as many vocabulary words as the
+crossings allow -> high `coverage`. A naive filler ignores the distinction and
+scores near-zero coverage; that gap is the behavior the fine-tune should learn.
 
-Self-contained on purpose: only stdlib + `random`, and it NEVER hardcodes words
-— every answer comes from the `word_source` passed in. This is a seed for
-OpenEvolve to evolve/diversify, and the positive fixture proving the harness
-accepts a real generator. Returns the standard layout schema; on failure it
-returns an empty grid (which the scorer marks invalid).
+Self-contained (stdlib + random). Accepts word_source as the dict above, or a
+flat list (treated as all-fill) for backward compatibility.
 """
 
 import random
 import time
 
 
-def _index_by_length(word_source):
+def _split_source(word_source):
+    if isinstance(word_source, dict):
+        theme = [str(w).upper() for w in word_source.get("theme", []) if str(w).isalpha()]
+        fill = [str(w).upper() for w in word_source.get("fill", []) if str(w).isalpha()]
+    else:
+        theme, fill = [], [str(w).upper() for w in word_source if str(w).isalpha()]
+    return theme, fill
+
+
+def _index_by_length(words):
     idx = {}
-    for w in word_source:
-        w = str(w).upper()
-        if w.isalpha():
-            idx.setdefault(len(w), []).append(w)
+    for w in words:
+        idx.setdefault(len(w), []).append(w)
     return idx
 
 
 def _runs(white, size):
-    """All maximal white runs (both directions) as (cells, length)."""
     out = []
     for dr, dc in ((0, 1), (1, 0)):
         for r in range(size):
             for c in range(size):
-                if (r, c) not in white:
+                if (r, c) not in white or (r - dr, c - dc) in white:
                     continue
-                if (r - dr, c - dc) in white:
-                    continue  # not a run start
-                cells = []
-                rr, cc = r, c
+                cells, rr, cc = [], r, c
                 while (rr, cc) in white:
                     cells.append((rr, cc))
                     rr, cc = rr + dr, cc + dc
@@ -70,36 +71,30 @@ def _structure_ok(white, size, min_len=3):
 
 
 def _make_structure(size, rng, min_len=3):
-    """Return a set of white cells forming a valid symmetric NYT-legal structure."""
     full = {(r, c) for r in range(size) for c in range(size)}
     if size <= 5:
-        return full  # a fully-open small square is already valid (word square)
-
+        return full
     cells = list(full)
-    for _ in range(60):  # a few structure attempts
+    for _ in range(60):
         rng.shuffle(cells)
         blacks = set()
-        target = (size * size) // 6  # ~17% black, NYT-ish
+        target = (size * size) // 6
         for (r, c) in cells:
             if len(blacks) >= target:
                 break
             partner = (size - 1 - r, size - 1 - c)
             if (r, c) == partner or (r, c) in blacks or partner in blacks:
                 continue
-            trial_white = full - (blacks | {(r, c), partner})
-            if _structure_ok(trial_white, size, min_len):
+            if _structure_ok(full - (blacks | {(r, c), partner}), size, min_len):
                 blacks |= {(r, c), partner}
         white = full - blacks
         if _structure_ok(white, size, min_len):
             return white
-    return full  # fallback (may be hard to fill for large size)
+    return full
 
 
 def _slots_and_crossings(white, size):
-    """Return (slots, cell_to_slots). Each slot: {'cells': [...], 'len': n}."""
-    slots = []
-    for cells, length in _runs(white, size):
-        slots.append({"cells": cells, "len": length})
+    slots = [{"cells": cells, "len": length} for cells, length in _runs(white, size)]
     cell_to_slots = {}
     for i, s in enumerate(slots):
         for cell in s["cells"]:
@@ -108,7 +103,6 @@ def _slots_and_crossings(white, size):
 
 
 def _build_pattern_index(idx_by_len):
-    """(length, position, letter) -> set(words) for O(1) constrained lookup."""
     pat = {}
     for length, words in idx_by_len.items():
         for w in words:
@@ -118,15 +112,14 @@ def _build_pattern_index(idx_by_len):
 
 
 def _pool(slot, letters, pat, by_len):
-    """Words matching the slot's currently-fixed letters (ignores word reuse)."""
     fixed = [(pos, letters[cell]) for pos, cell in enumerate(slot["cells"]) if cell in letters]
     if not fixed:
-        return by_len.get(slot["len"], [])
+        return set(by_len.get(slot["len"], []))
     sets = []
     for pos, ch in fixed:
         s = pat.get((slot["len"], pos, ch))
         if not s:
-            return []
+            return set()
         sets.append(s)
     sets.sort(key=len)
     result = set(sets[0])
@@ -137,13 +130,11 @@ def _pool(slot, letters, pat, by_len):
     return result
 
 
-def _fill(slots, cell_to_slots, idx, rng, budget=200000, deadline=None):
-    """Backtracking + MRV + forward checking with a pattern index. -> {slot: word} or None."""
+def _fill(slots, cell_to_slots, idx, theme_set, rng, budget=1500, deadline=None):
     by_len = idx
     pat = _build_pattern_index(idx)
     letters, assignment, used = {}, {}, set()
     steps = [0]
-
     neigh = []
     for si, s in enumerate(slots):
         nb = set()
@@ -153,7 +144,7 @@ def _fill(slots, cell_to_slots, idx, rng, budget=200000, deadline=None):
                     nb.add(other)
         neigh.append(nb)
 
-    def domain_size(si):
+    def dom_size(si):
         return len(_pool(slots[si], letters, pat, by_len))
 
     def backtrack():
@@ -162,21 +153,21 @@ def _fill(slots, cell_to_slots, idx, rng, budget=200000, deadline=None):
         steps[0] += 1
         if len(assignment) == len(slots):
             return True
-        # MRV: unassigned slot with the smallest current domain
-        best_si, best = None, 1 << 30
-        for si in range(len(slots)):
-            if si in assignment:
-                continue
-            size = domain_size(si)
-            if size < best:
-                best_si, best = si, size
-                if best == 0:
-                    break
-        if best_si is None or best == 0:
-            return False
-        cands = [w for w in _pool(slots[best_si], letters, pat, by_len) if w not in used]
-        rng.shuffle(cands)  # randomized -> diverse solutions across runs
-        for word in cands:
+        unassigned = [si for si in range(len(slots)) if si not in assignment]
+        for si in unassigned:
+            if dom_size(si) == 0:
+                return False  # dead end -> backtrack
+        # Seat theme words where they FIT: longest slots first (SAT words are long),
+        # tie-break by most-constrained. This packs vocabulary into the long entries
+        # before short-slot fill locks the crossings.
+        best_si = max(unassigned, key=lambda si: (slots[si]["len"], -dom_size(si)))
+        pool = [w for w in _pool(slots[best_si], letters, pat, by_len) if w not in used]
+        # THEME-FIRST: try vocabulary words before fill words for this slot.
+        theme_c = [w for w in pool if w in theme_set]
+        other_c = [w for w in pool if w not in theme_set]
+        rng.shuffle(theme_c)
+        rng.shuffle(other_c)
+        for word in theme_c + other_c:
             changed = []
             for pos, cell in enumerate(slots[best_si]["cells"]):
                 if cell not in letters:
@@ -184,7 +175,7 @@ def _fill(slots, cell_to_slots, idx, rng, budget=200000, deadline=None):
                     changed.append(cell)
             assignment[best_si] = word
             used.add(word)
-            dead = any(nb not in assignment and domain_size(nb) == 0 for nb in neigh[best_si])
+            dead = any(nb not in assignment and dom_size(nb) == 0 for nb in neigh[best_si])
             if not dead and backtrack():
                 return True
             del assignment[best_si]
@@ -205,7 +196,7 @@ def _build_layout(white, size, slots, assignment):
     def is_white(r, c):
         return (r, c) in grid
 
-    numbers, n = {}, 0
+    numbers, num = {}, 0
     across, down = [], []
     for r in range(size):
         for c in range(size):
@@ -214,20 +205,20 @@ def _build_layout(white, size, slots, assignment):
             sa = (c == 0 or not is_white(r, c - 1)) and (c + 1 < size and is_white(r, c + 1))
             sd = (r == 0 or not is_white(r - 1, c)) and (r + 1 < size and is_white(r + 1, c))
             if sa or sd:
-                n += 1
-                numbers[(r, c)] = n
+                num += 1
+                numbers[(r, c)] = num
             if sa:
                 w, cc = "", c
                 while cc < size and is_white(r, cc):
                     w += grid[(r, cc)]
                     cc += 1
-                across.append({"number": n, "row": r, "col": c, "answer": w, "len": len(w)})
+                across.append({"number": num, "row": r, "col": c, "answer": w, "len": len(w)})
             if sd:
                 w, rr = "", r
                 while rr < size and is_white(rr, c):
                     w += grid[(rr, c)]
                     rr += 1
-                down.append({"number": n, "row": r, "col": c, "answer": w, "len": len(w)})
+                down.append({"number": num, "row": r, "col": c, "answer": w, "len": len(w)})
     cells = []
     for (r, c), ch in sorted(grid.items()):
         cell = {"r": r, "c": c, "letter": ch}
@@ -238,17 +229,17 @@ def _build_layout(white, size, slots, assignment):
 
 
 def generate_crossword(topic, word_source, size):
-    deadline = time.perf_counter() + 4.0  # wall-clock bound (stays under sandbox timeout)
+    deadline = time.perf_counter() + 4.0
+    theme, fill = _split_source(word_source)
+    theme_set = set(theme)
+    idx = _index_by_length(theme + fill)
     rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
-    if isinstance(word_source, dict):  # theme+fill contract: this baseline just fills from both
-        word_source = list(word_source.get("theme", [])) + list(word_source.get("fill", []))
-    idx = _index_by_length(word_source)
-    for _ in range(200):  # fail fast per structure, try many structures within the deadline
+    for _ in range(200):
         if time.perf_counter() > deadline:
             break
         white = _make_structure(size, rng)
         slots, cell_to_slots = _slots_and_crossings(white, size)
-        assignment = _fill(slots, cell_to_slots, idx, rng, budget=1200, deadline=deadline)
+        assignment = _fill(slots, cell_to_slots, idx, theme_set, rng, budget=1500, deadline=deadline)
         if assignment and len(assignment) == len(slots):
             return _build_layout(white, size, slots, assignment)
     return {"rows": size, "cols": size, "cells": [], "across": [], "down": []}

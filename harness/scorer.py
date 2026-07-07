@@ -156,6 +156,7 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
         "runtime_ok": 1.0,
         "symmetry_ok": True,
         "accidental": 0,
+        "crossings": 0,
         "combined_score": 0.0,
         "combined_gated": 0.0,
         "reasons": reasons,
@@ -265,6 +266,14 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
 
     accidental = len([1 for (r, c, w, l) in hruns + vruns if l >= minlen and (r, c, w) not in (claimed_a | claimed_d)])
     R["accidental"] = accidental
+
+    # crossings: white cells belonging to BOTH an across and a down entry
+    # (each of length >= min_word_len). This is the crossword "checked-cell" /
+    # word-intersection count — a graded interconnection measure that stays
+    # informative even when the grid falls short of full validity.
+    across_cells = {(r, c + i) for (r, c, w, l) in hruns if l >= minlen for i in range(l)}
+    down_cells = {(r + i, c) for (r, c, w, l) in vruns if l >= minlen for i in range(l)}
+    R["crossings"] = len(across_cells & down_cells)
 
     # --- metrics ---
     R["connected"] = 1 if connected else 0

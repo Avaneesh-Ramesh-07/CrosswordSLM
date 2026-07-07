@@ -1,0 +1,144 @@
+"""Generate train/colab_eval.ipynb (the CrossWordBench base-model eval run).
+
+Companion to make_colab.py. This notebook serves Qwen3-4B via vLLM and runs the
+CrossWordBench-derived eval (bench/) INSIDE the Colab session against
+localhost:8000 -- no tunnel. It reports the binary success rate (valid config)
+plus the nuance metrics (crossings, coverage, black-square delta), with the
+reference grid and a seed generator as baselines/anchors.
+
+Run:  python train/make_colab_eval.py
+"""
+
+import json
+import os
+
+MD = "markdown"
+CO = "code"
+
+cells = [
+ (MD, "# CrossWordBench Eval — Qwen3-4B baseline\n\n"
+      "Serve **Qwen3-4B** with vLLM and run the CrossWordBench-derived eval in the same "
+      "session (against `localhost:8000` — **no tunnel**). Each puzzle's word set + size + "
+      "black-square count become a SPEC; the model produces a crossword configuration; we "
+      "score **success** (valid config) plus **crossings**, **coverage**, and **black-square "
+      "delta**.\n\n"
+      "**Runtime:** GPU (T4 is enough for a 4B model). **Order:** run top to bottom."),
+
+ (MD, "## 1. Get the code\nClone the repo (set your URL) or upload the project folder and "
+      "set `PROJECT_DIR`. The `bench/`, `harness/`, `pipeline/`, and `seeds/` dirs must be present."),
+ (CO, 'REPO_URL = "https://github.com/YOUR_USER/YOUR_REPO.git"   # <-- set this, or upload the folder\n'
+      'import os\n'
+      '!git clone -q $REPO_URL slm || echo "clone skipped/failed — upload the folder instead"\n'
+      'PROJECT_DIR = "/content/slm"   # adjust if you uploaded elsewhere\n'
+      'assert os.path.isdir(os.path.join(PROJECT_DIR, "bench")), "Set PROJECT_DIR to the repo root"\n'
+      '%cd $PROJECT_DIR'),
+
+ (MD, "## 2. Install dependencies\nThe eval harness is pure-Python stdlib; we only need vLLM "
+      "(to serve the model) and requests (to poll it)."),
+ (CO, "!pip -q install vllm requests"),
+
+ (MD, "## 3. Pull the CrossWordBench data (gated)\n"
+      "The dataset is gated, so you need a HuggingFace **read** token whose account has "
+      "**accepted the terms** at huggingface.co/datasets/HINT-lab/CrossWordBench. The token is "
+      "read via getpass (not stored in the notebook). Pulls the `english` config (7x7 + 14x14) "
+      "as compact JSONL into `data/crosswordbench/`."),
+ (CO, 'import os, getpass\n'
+      'os.environ["HF_TOKEN"] = getpass.getpass("HF read token (gated access accepted): ")\n'
+      '!python bench/pull_crosswordbench.py --config english\n'
+      '!ls -la data/crosswordbench/'),
+
+ (MD, "## 4. Serve Qwen3-4B via vLLM\n"
+      "T4: keep `--dtype half`. A100/L4: `bfloat16` and a larger `--max-model-len` are fine."),
+ (CO, 'import subprocess, sys, time, requests\n'
+      'MODEL = "Qwen/Qwen3-4B"\n'
+      'log = open("vllm.log", "w")\n'
+      'server = subprocess.Popen(\n'
+      '    [sys.executable, "-m", "vllm.entrypoints.openai.api_server",\n'
+      '     "--model", MODEL, "--dtype", "half", "--max-model-len", "8192",\n'
+      '     "--gpu-memory-utilization", "0.90", "--port", "8000"],\n'
+      '    stdout=log, stderr=subprocess.STDOUT)\n'
+      'up = False\n'
+      'for _ in range(120):\n'
+      '    try:\n'
+      '        if requests.get("http://localhost:8000/v1/models", timeout=2).ok:\n'
+      '            up = True; break\n'
+      '    except Exception:\n'
+      '        pass\n'
+      '    time.sleep(10)\n'
+      'print("vLLM up" if up else "NOT up — see vllm.log below")\n'
+      '!tail -n 20 vllm.log'),
+
+ (MD, "## 5. Baselines / anchors (no model needed)\n"
+      "`reference` scores each puzzle's OWN grid — the crossings ceiling (and proof the loose "
+      "references are not scorer-valid: success 0). `seed:reference_v1` runs a hand-written CSP "
+      "generator as a 'model' — a floor showing how hard a valid fill is from only the given words."),
+ (CO, "!python bench/run_crosswordbench.py --model reference --config english\n"
+      "!python bench/run_crosswordbench.py --model seed:reference_v1 --config english --limit 20"),
+
+ (MD, "## 6. Smoke test: Qwen3-4B on 20 puzzles\n"
+      "Confirms the endpoint round-trip and response parsing before the full run. "
+      "`--mode program` = model writes a `generate_crossword` program we run in the sandbox "
+      "(matches your trained SLM's interface). Use `--mode direct` to have it emit the layout JSON itself."),
+ (CO, "!python bench/run_crosswordbench.py --model endpoint --mode program \\\n"
+      "    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n"
+      "    --config english --split 7x7 --limit 20"),
+
+ (MD, "## 7. Full eval + save per-puzzle results\n"
+      "Runs all 200 english puzzles in both modes. Per-puzzle rows go to `runs/eval/*.jsonl` for "
+      "later analysis and for comparison against the tuned SLM."),
+ (CO, 'import os\n'
+      'os.makedirs("runs/eval", exist_ok=True)\n'
+      '!python bench/run_crosswordbench.py --model endpoint --mode program \\\n'
+      '    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n'
+      '    --config english --out runs/eval/qwen3_4b_program.jsonl\n'
+      '!python bench/run_crosswordbench.py --model endpoint --mode direct \\\n'
+      '    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n'
+      '    --config english --out runs/eval/qwen3_4b_direct.jsonl'),
+
+ (MD, "## 8. Save results to Drive"),
+ (CO, 'from google.colab import drive\n'
+      'drive.mount("/content/drive")\n'
+      '!mkdir -p /content/drive/MyDrive/slm_runs/eval\n'
+      '!cp -r runs/eval/* /content/drive/MyDrive/slm_runs/eval/ 2>/dev/null || true\n'
+      'print("saved runs/eval to Drive")'),
+
+ (MD, "## Next\n"
+      "These are the **base-model** numbers. After QLoRA training, re-run cell 7 pointing "
+      "`--model-name` at the tuned checkpoint (served the same way) to get the base-vs-tuned "
+      "delta on identical held-out puzzles."),
+]
+
+
+def build():
+    nb_cells = []
+    for kind, src in cells:
+        cell = {"cell_type": kind, "metadata": {}, "source": src}
+        if kind == CO:
+            cell["execution_count"] = None
+            cell["outputs"] = []
+        nb_cells.append(cell)
+    nb = {
+        "cells": nb_cells,
+        "metadata": {
+            "kernelspec": {"name": "python3", "display_name": "Python 3"},
+            "language_info": {"name": "python"},
+            "accelerator": "GPU",
+            "colab": {"provenance": []},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "colab_eval.ipynb")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(nb, fh, indent=1)
+    return out
+
+
+if __name__ == "__main__":
+    path = build()
+    with open(path, encoding="utf-8") as fh:
+        nb = json.load(fh)
+    print(f"wrote {path}")
+    print(f"cells: {len(nb['cells'])} "
+          f"({sum(c['cell_type']=='code' for c in nb['cells'])} code, "
+          f"{sum(c['cell_type']=='markdown' for c in nb['cells'])} md)")

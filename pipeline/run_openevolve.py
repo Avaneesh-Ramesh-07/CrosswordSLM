@@ -89,8 +89,9 @@ def write_problem(spec, edu, path, n_draws=1, seed=0):
         "min_word_len": spec.min_word_len,
         "time_budget_s": spec.time_budget_s,
         "density_target": spec.density_target,
-        "topic_words": edu["targets"],       # coverage rewards placing the vocab
-        "word_source": edu["allowed"],
+        # theme+fill contract: generator gets {theme, fill}; scorer rewards theme (coverage)
+        "theme": edu["targets"],
+        "fill": edu.get("fill_words", []),
         "scores": edu["scores"],
         "n_draws": n_draws,
         "seed": seed,
@@ -158,7 +159,9 @@ def main():
     for sname in seed_names:
         seed_path = os.path.join(_SEEDS_DIR, sname + ".py")
         if not os.path.exists(seed_path):
-            print(f"  !! seed not found: {seed_path} — skipping")
+            seed_path = os.path.join(_ROOT, "teachers", sname + ".py")  # teacher generators
+        if not os.path.exists(seed_path):
+            print(f"  !! seed not found: {sname} — skipping")
             continue
         ip = make_initial_program(seed_path, os.path.join(run_dir, f"initial_{sname}.py"))
         for i, spec in enumerate(specs):
