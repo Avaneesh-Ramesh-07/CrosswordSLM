@@ -69,11 +69,16 @@ cells = [
       '!tail -n 20 vllm.log'),
 
  (MD, "## 5. Baselines / anchors (no model needed)\n"
-      "`reference` scores each puzzle's OWN grid — the crossings ceiling (and proof the loose "
-      "references are not scorer-valid: success 0). `seed:reference_v1` runs a hand-written CSP "
-      "generator as a 'model' — a floor showing how hard a valid fill is from only the given words."),
- (CO, "!python bench/run_crosswordbench.py --model reference --config english\n"
-      "!python bench/run_crosswordbench.py --model seed:reference_v1 --config english --limit 20"),
+      "`reference` scores each puzzle's OWN grid. Two validity modes:\n"
+      "- **strict** (NYT rules: every cell checked both ways + symmetry) — references score ~0 "
+      "(they're loose auto-fills), so this is a hard target.\n"
+      "- **relaxed** (`--relaxed`, CrossWordBench-style: unchecked cells allowed, but every cell in "
+      "a real entry, no conflicts, connected) — references score ~1.0, so `success` is meaningful.\n\n"
+      "`seed:reference_v1` runs a hand-written CSP generator as a 'model' — a floor showing how hard "
+      "a valid fill is from only the ~12 given words."),
+ (CO, "!python bench/run_crosswordbench.py --model reference --config english            # strict\n"
+      "!python bench/run_crosswordbench.py --model reference --config english --relaxed  # relaxed (≈1.0)\n"
+      "!python bench/run_crosswordbench.py --model seed:reference_v1 --config english --limit 20 --relaxed"),
 
  (MD, "## 6. Smoke test: Qwen3-4B on 20 puzzles\n"
       "Confirms the endpoint round-trip and response parsing before the full run. "
@@ -84,16 +89,20 @@ cells = [
       "    --config english --split 7x7 --limit 20"),
 
  (MD, "## 7. Full eval + save per-puzzle results\n"
-      "Runs all 200 english puzzles in both modes. Per-puzzle rows go to `runs/eval/*.jsonl` for "
-      "later analysis and for comparison against the tuned SLM."),
+      "Runs all 200 english puzzles. `--mode program` (matches your trained SLM's interface) is "
+      "reported under both **strict** and **relaxed** validity; `--mode direct` (model emits the "
+      "layout JSON) under relaxed. Per-puzzle rows go to `runs/eval/*.jsonl` for later analysis and "
+      "for comparison against the tuned SLM. Success may be ~0 under strict — the crossings / "
+      "coverage / black-delta columns are where the signal is."),
  (CO, 'import os\n'
       'os.makedirs("runs/eval", exist_ok=True)\n'
-      '!python bench/run_crosswordbench.py --model endpoint --mode program \\\n'
-      '    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n'
-      '    --config english --out runs/eval/qwen3_4b_program.jsonl\n'
-      '!python bench/run_crosswordbench.py --model endpoint --mode direct \\\n'
-      '    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n'
-      '    --config english --out runs/eval/qwen3_4b_direct.jsonl'),
+      'EP = "--base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B --config english"\n'
+      '!python bench/run_crosswordbench.py --model endpoint --mode program $EP \\\n'
+      '    --out runs/eval/qwen3_4b_program_strict.jsonl\n'
+      '!python bench/run_crosswordbench.py --model endpoint --mode program $EP --relaxed \\\n'
+      '    --out runs/eval/qwen3_4b_program_relaxed.jsonl\n'
+      '!python bench/run_crosswordbench.py --model endpoint --mode direct $EP --relaxed \\\n'
+      '    --out runs/eval/qwen3_4b_direct_relaxed.jsonl'),
 
  (MD, "## 8. Save results to Drive"),
  (CO, 'from google.colab import drive\n'

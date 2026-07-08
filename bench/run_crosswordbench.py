@@ -196,6 +196,8 @@ def main() -> None:
     ap.add_argument("--model", required=True, help="reference | seed:NAME | endpoint")
     ap.add_argument("--mode", default="program", choices=("program", "direct"),
                     help="endpoint output: program (run in sandbox) or direct layout JSON")
+    ap.add_argument("--relaxed", action="store_true",
+                    help="CrossWordBench-style validity (unchecked cells allowed) vs NYT-strict")
     ap.add_argument("--config", default="english")
     ap.add_argument("--split", default=None, help="e.g. 7x7 or 14x14 (default: all)")
     ap.add_argument("--limit", type=int, default=None, help="max puzzles per split")
@@ -234,12 +236,13 @@ def main() -> None:
                     layout, runtime_s = _run_program(code, pz, timeout_s=float(max(8, pz.size)))
             else:
                 raise SystemExit(f"unknown --model {args.model}")
-            results.append(score_layout(layout, pz, runtime_s=runtime_s))
+            results.append(score_layout(layout, pz, runtime_s=runtime_s, relaxed=args.relaxed))
 
     overall = _agg(results)
     by_size = {size: _agg([r for r in results if r["size"] == size])
                for size in sorted({r["size"] for r in results})}
     label = f"{args.model}:{args.mode}" if args.model == "endpoint" else args.model
+    label += " [relaxed]" if args.relaxed else " [strict]"
     _print_report(label, overall, by_size)
 
     if args.out:

@@ -157,14 +157,15 @@ def load_puzzles(path: str) -> list:
         return [extract(json.loads(line)) for line in fh if line.strip()]
 
 
-def score_layout(layout, puzzle: Puzzle, runtime_s=None) -> dict:
+def score_layout(layout, puzzle: Puzzle, runtime_s=None, relaxed=False) -> dict:
     """Score a model-produced layout against a Puzzle. Returns bench metrics.
 
     `success` is the binary the user cares about (valid crossword using only the
-    supplied words); the rest are the sub-binary nuance metrics.
+    supplied words); the rest are the sub-binary nuance metrics. `relaxed` picks
+    CrossWordBench-style validity (unchecked cells allowed) over NYT-strict.
     """
     spec = puzzle.scorer_spec()
-    R = score(layout, spec, word_source=puzzle.words, runtime_s=runtime_s)
+    R = score(layout, spec, word_source=puzzle.words, runtime_s=runtime_s, relaxed=relaxed)
 
     size = puzzle.size
     white = round(R["fill_density"] * size * size)

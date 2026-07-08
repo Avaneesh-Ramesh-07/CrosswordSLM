@@ -132,7 +132,7 @@ def _symmetric(white: set, size: int) -> bool:
 
 
 def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
-          scores=None, unscored_default=50) -> dict:
+          scores=None, unscored_default=50, relaxed=False) -> dict:
     """Score one generated crossword against `spec`. Returns a metrics dict.
 
     `word_source`     : iterable of allowed words (topic words + fill list).
@@ -144,6 +144,13 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
                         `unscored_default` (neutral, so quality neither helps nor
                         hurts). Words absent from `scores` also get the default.
     `unscored_default`: neutral score (0-100) for answers with no score.
+    `relaxed`         : if True, use CrossWordBench-style validity instead of the
+                        strict NYT rules: short/unchecked runs are tolerated (not
+                        every cell must be checked in BOTH directions) as long as
+                        every white cell still belongs to at least one real entry
+                        (>= min_word_len). No-conflict, real-word, connected, and
+                        dims checks still apply. Default False (strict), so the
+                        OpenEvolve/training path is unchanged.
     """
     reasons: list = []
     R = {
@@ -239,13 +246,20 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
     minlen = spec.min_word_len
 
     bad_short = [x for x in hruns + vruns if x[3] < minlen]
-    if bad_short:
+    if bad_short and not relaxed:
         reasons.append(f"{len(bad_short)} run(s) shorter than {minlen} (unchecked/short)")
 
-    actual_a = {(r, c, w) for (r, c, w, l) in hruns}
-    actual_d = {(r, c, w) for (r, c, w, l) in vruns}
-    claimed_a = {(int(e["row"]), int(e["col"]), _norm(e["answer"])) for e in across}
-    claimed_d = {(int(e["row"]), int(e["col"]), _norm(e["answer"])) for e in down}
+    # Strict compares ALL runs (so a stray length-1 run is a mismatch); relaxed
+    # compares only entries >= min_word_len, treating short runs as tolerated
+    # fragments on both the actual and declared sides.
+    def _keep(length):
+        return length >= minlen or not relaxed
+    actual_a = {(r, c, w) for (r, c, w, l) in hruns if _keep(l)}
+    actual_d = {(r, c, w) for (r, c, w, l) in vruns if _keep(l)}
+    claimed_a = {(int(e["row"]), int(e["col"]), _norm(e["answer"]))
+                 for e in across if _keep(len(_norm(e["answer"])))}
+    claimed_d = {(int(e["row"]), int(e["col"]), _norm(e["answer"]))
+                 for e in down if _keep(len(_norm(e["answer"])))}
     if actual_a != claimed_a:
         reasons.append("declared across entries != actual horizontal runs")
     if actual_d != claimed_d:
@@ -274,6 +288,12 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
     across_cells = {(r, c + i) for (r, c, w, l) in hruns if l >= minlen for i in range(l)}
     down_cells = {(r + i, c) for (r, c, w, l) in vruns if l >= minlen for i in range(l)}
     R["crossings"] = len(across_cells & down_cells)
+
+    # relaxed only: every white cell must still belong to at least one real entry
+    # (>= min_word_len) -- allows unchecked cells but forbids floating fragments.
+    floating = white - (across_cells | down_cells)
+    if relaxed and floating:
+        reasons.append(f"{len(floating)} white cell(s) in no entry >= {minlen}")
 
     # --- metrics ---
     R["connected"] = 1 if connected else 0
@@ -310,7 +330,8 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
     valid = (
         not conflict
         and not oob
-        and not bad_short
+        and (relaxed or not bad_short)
+        and (not relaxed or not floating)
         and actual_a == claimed_a
         and actual_d == claimed_d
         and not nonword
