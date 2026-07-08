@@ -28,6 +28,7 @@ import json
 import os
 import re
 import statistics as st
+import time
 import urllib.error
 import urllib.request
 
@@ -213,30 +214,44 @@ def main() -> None:
         raise SystemExit(f"no data files match {pattern} in {_DATA}")
 
     seed_code = _seed_code(args.model.split(":", 1)[1]) if args.model.startswith("seed:") else None
-    results = []
+
+    # gather the full work list up front so we can show progress + a live ETA
+    # (raw rows kept alongside so --model reference can rebuild the grid)
+    work = []
     for path in paths:
-        # raw rows kept in parallel so --model reference can rebuild the grid
         raw = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
         puzzles = load_puzzles(path)
         if args.limit:
             raw, puzzles = raw[:args.limit], puzzles[:args.limit]
-        for row, pz in zip(raw, puzzles):
-            runtime_s = None
-            if args.model == "reference":
-                grid = json.loads(row["puzzle_state"])["grid"]
-                layout, runtime_s = _reference_layout(pz, grid)
-            elif seed_code is not None:
-                layout, runtime_s = _run_program(seed_code, pz, timeout_s=float(max(8, pz.size)))
-            elif args.model == "endpoint":
-                if args.mode == "direct":
-                    layout = _endpoint_layout(pz.direct_prompt(), args.base_url,
-                                              args.model_name, args.api_key)
-                else:
-                    code = _endpoint_code(pz.prompt(), args.base_url, args.model_name, args.api_key)
-                    layout, runtime_s = _run_program(code, pz, timeout_s=float(max(8, pz.size)))
+        work.extend(zip(raw, puzzles))
+
+    total = len(work)
+    mode = f"{args.mode}/{'relaxed' if args.relaxed else 'strict'}"
+    print(f"scoring {total} puzzles :: model={args.model} {mode}", flush=True)
+    results, t0 = [], time.time()
+    for i, (row, pz) in enumerate(work, 1):
+        runtime_s = None
+        if args.model == "reference":
+            grid = json.loads(row["puzzle_state"])["grid"]
+            layout, runtime_s = _reference_layout(pz, grid)
+        elif seed_code is not None:
+            layout, runtime_s = _run_program(seed_code, pz, timeout_s=float(max(8, pz.size)))
+        elif args.model == "endpoint":
+            if args.mode == "direct":
+                layout = _endpoint_layout(pz.direct_prompt(), args.base_url,
+                                          args.model_name, args.api_key)
             else:
-                raise SystemExit(f"unknown --model {args.model}")
-            results.append(score_layout(layout, pz, runtime_s=runtime_s, relaxed=args.relaxed))
+                code = _endpoint_code(pz.prompt(), args.base_url, args.model_name, args.api_key)
+                layout, runtime_s = _run_program(code, pz, timeout_s=float(max(8, pz.size)))
+        else:
+            raise SystemExit(f"unknown --model {args.model}")
+        r = score_layout(layout, pz, runtime_s=runtime_s, relaxed=args.relaxed)
+        results.append(r)
+        el = time.time() - t0
+        eta = el / i * (total - i)
+        print(f"[{i:>3}/{total}] id={pz.puzzle_id:>4} sz{pz.size} {r['status']:<9} "
+              f"ok={r['success']} cross={r['crossings']:<3} cov={r['coverage']:.2f} "
+              f"| {el:4.0f}s elapsed, ETA {eta:4.0f}s", flush=True)
 
     overall = _agg(results)
     by_size = {size: _agg([r for r in results if r["size"] == size])
