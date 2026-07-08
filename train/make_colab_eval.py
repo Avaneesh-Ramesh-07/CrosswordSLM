@@ -33,9 +33,10 @@ cells = [
       'assert os.path.isdir(os.path.join(PROJECT_DIR, "bench")), "Set PROJECT_DIR to the repo root"\n'
       '%cd $PROJECT_DIR'),
 
- (MD, "## 2. Install dependencies\nThe eval harness is pure-Python stdlib; we only need vLLM "
-      "(to serve the model) and requests (to poll it)."),
- (CO, "!pip -q install vllm requests"),
+ (MD, "## 2. Check the GPU\nThe eval harness is pure-Python stdlib and Ollama self-installs in the "
+      "serve cell, so there's nothing to pip-install. Just confirm a GPU is attached — if not, "
+      "**Runtime → Change runtime type → T4 GPU**."),
+ (CO, '!nvidia-smi -L || echo "NO GPU — set Runtime > Change runtime type > T4 GPU, then rerun"'),
 
  (MD, "## 3. Pull the CrossWordBench data (gated)\n"
       "The dataset is gated, so you need a HuggingFace **read** token whose account has "
@@ -47,44 +48,60 @@ cells = [
       '!python bench/pull_crosswordbench.py --config english\n'
       '!ls -la data/crosswordbench/'),
 
- (MD, "## 4. Serve Qwen3-4B via vLLM\n"
-      "T4: keep `--dtype half`. A100/L4: `bfloat16` and a larger `--max-model-len` are fine."),
- (CO,
-      'import subprocess, sys, time, requests\n'
-      '\n'
-      'MODEL = "Qwen/Qwen3-4B"\n'
-      'LOG = "vllm.log"\n'
-      'server = subprocess.Popen(\n'
-      '    [sys.executable, "-m", "vllm.entrypoints.openai.api_server",\n'
-      '     "--model", MODEL, "--dtype", "half", "--max-model-len", "8192",\n'
-      '     "--gpu-memory-utilization", "0.90", "--port", "8000"],\n'
-      '    stdout=open(LOG, "w"), stderr=subprocess.STDOUT)\n'
-      'print(f"launched vLLM pid={server.pid} for {MODEL}; first run downloads ~8GB…", flush=True)\n'
-      '\n'
-      'def _tail(n=8):\n'
-      '    try:\n'
-      '        with open(LOG) as fh: return "".join(fh.readlines()[-n:]).rstrip()\n'
-      '    except FileNotFoundError: return "(no log yet)"\n'
-      '\n'
-      'start, DEADLINE, up, i = time.time(), 1500, False, 0\n'
-      'while time.time() - start < DEADLINE:\n'
-      '    el = int(time.time() - start)\n'
-      '    rc = server.poll()\n'
-      '    if rc is not None:                       # crashed -> stop now, show why\n'
-      '        print(f"\\n[{el}s] vLLM EXITED rc={rc}. Last log:\\n", flush=True)\n'
-      '        print(_tail(40), flush=True); break\n'
-      '    try:\n'
-      '        if requests.get("http://localhost:8000/v1/models", timeout=2).ok:\n'
-      '            up = True; print(f"\\n[{el}s] vLLM UP — {MODEL} ready on :8000", flush=True); break\n'
-      '    except Exception:\n'
-      '        pass\n'
-      '    if i % 3 == 0:                           # heartbeat + latest log line ~every 15s\n'
-      '        print(f"[{el:4d}s] loading… | {_tail(1)}", flush=True)\n'
-      '    i += 1; time.sleep(5)\n'
-      'if not up and server.poll() is None:\n'
-      '    print(f"\\n[{int(time.time()-start)}s] TIMEOUT — still not serving.", flush=True)\n'
-      'if not up:\n'
-      '    print("\\n===== tail vllm.log =====\\n" + _tail(40), flush=True)'),
+ (MD, "## 4. Serve Qwen3-4B via Ollama\n"
+      "vLLM on Colab often breaks on CUDA-version drift (missing `libcudart`); Ollama bundles its own "
+      "CUDA runners, so it just works. This installs the Linux x86-64 build (asset looked up "
+      "dynamically so a version bump won't break it), starts the server on :11434, and pulls the "
+      "model. Default tag is Q4 (~2.6GB); set `MODEL = \"qwen3:4b-fp16\"` (~8GB) for full precision."),
+ (CO, r'''# Serve Qwen3-4B via Ollama (dynamic asset lookup; zstd tarball)
+import subprocess, time, requests
+
+# 1) find the current linux x86-64 build (asset name/format changes across releases)
+rel = requests.get("https://api.github.com/repos/ollama/ollama/releases/latest", timeout=30).json()
+assets = {a["name"]: a for a in rel.get("assets", [])}
+name = "ollama-linux-amd64.tar.zst"
+assert name in assets, f"{name} not in release {rel.get('tag_name')}: {sorted(assets)}"
+url, mb = assets[name]["browser_download_url"], assets[name]["size"] // 1024 // 1024
+print(f"downloading ollama {rel['tag_name']} :: {name} ({mb}MB)…", flush=True)
+
+# 2) download + extract to /usr  (-f fails visibly on HTTP error, -L follows redirects)
+subprocess.run(f"curl -fSL '{url}' -o /tmp/ollama.tar.zst", shell=True, check=True)
+subprocess.run("command -v zstd >/dev/null || apt-get -qq install -y zstd", shell=True)
+subprocess.run("tar -I zstd -xf /tmp/ollama.tar.zst -C /usr", shell=True, check=True)
+print("ollama:", subprocess.run(["/usr/bin/ollama", "--version"],
+      capture_output=True, text=True).stdout.strip() or "installed", flush=True)
+
+# 3) start the server in the background
+srv = subprocess.Popen(["/usr/bin/ollama", "serve"],
+                       stdout=open("ollama.log", "w"), stderr=subprocess.STDOUT)
+print(f"launched ollama pid={srv.pid}", flush=True)
+
+def _tail(p="ollama.log", n=6):
+    try:
+        with open(p) as fh: return "".join(fh.readlines()[-n:]).rstrip()
+    except FileNotFoundError: return "(no log yet)"
+
+# 4) wait for the API (crash-aware)
+up, start = False, time.time()
+while time.time() - start < 120:
+    el = int(time.time() - start)
+    rc = srv.poll()
+    if rc is not None:
+        print(f"[{el}s] ollama serve EXITED rc={rc}. Log:\n{_tail(n=20)}", flush=True); break
+    try:
+        if requests.get("http://localhost:11434/api/tags", timeout=2).ok:
+            up = True; print(f"[{el}s] ollama UP on :11434", flush=True); break
+    except Exception:
+        pass
+    if el % 15 < 3: print(f"[{el:4d}s] starting… | {_tail(n=1)}", flush=True)
+    time.sleep(3)
+
+# 5) pull the model (progress streams to the cell)
+MODEL = "qwen3:4b"              # Q4 (~2.6GB). fp16: "qwen3:4b-fp16" (~8GB)
+if up:
+    print(f"pulling {MODEL} (first time only)…", flush=True)
+    subprocess.run(["/usr/bin/ollama", "pull", MODEL], check=True)
+    print(f"{MODEL} ready — serving OpenAI-compatible API at http://localhost:11434/v1", flush=True)'''),
 
  (MD, "## 5. Baselines / anchors (no model needed)\n"
       "`reference` scores each puzzle's OWN grid. Two validity modes:\n"
@@ -103,7 +120,7 @@ cells = [
       "`--mode program` = model writes a `generate_crossword` program we run in the sandbox "
       "(matches your trained SLM's interface). Use `--mode direct` to have it emit the layout JSON itself."),
  (CO, "!python bench/run_crosswordbench.py --model endpoint --mode program \\\n"
-      "    --base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B \\\n"
+      "    --base-url http://localhost:11434/v1 --model-name qwen3:4b \\\n"
       "    --config english --split 7x7 --limit 20"),
 
  (MD, "## 7. Full eval + save per-puzzle results\n"
@@ -114,7 +131,7 @@ cells = [
       "coverage / black-delta columns are where the signal is."),
  (CO, 'import os\n'
       'os.makedirs("runs/eval", exist_ok=True)\n'
-      'EP = "--base-url http://localhost:8000/v1 --model-name Qwen/Qwen3-4B --config english"\n'
+      'EP = "--base-url http://localhost:11434/v1 --model-name qwen3:4b --config english"\n'
       '!python bench/run_crosswordbench.py --model endpoint --mode program $EP \\\n'
       '    --out runs/eval/qwen3_4b_program_strict.jsonl\n'
       '!python bench/run_crosswordbench.py --model endpoint --mode program $EP --relaxed \\\n'
