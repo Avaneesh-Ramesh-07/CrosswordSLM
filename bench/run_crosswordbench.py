@@ -157,7 +157,8 @@ def _agg(results: list) -> dict:
     n = len(results)
     return {
         "n": n,
-        "success_rate": round(sum(r["success"] for r in results) / n, 4),
+        "success_strict": round(sum(r["success_strict"] for r in results) / n, 4),
+        "success_relaxed": round(sum(r["success_relaxed"] for r in results) / n, 4),
         "mean_crossings": mean("crossings"),
         "mean_crossings_vs_ref": mean("crossings_vs_ref"),
         "mean_crossing_ratio": mean("crossing_ratio"),
@@ -178,7 +179,8 @@ def _counts(it):
 def _print_report(model, overall, by_size):
     print(f"\n===== CrossWordBench eval :: model={model} =====")
     print(f"puzzles: {overall.get('n', 0)}")
-    print(f"SUCCESS RATE (valid config)     : {overall.get('success_rate')}")
+    print(f"SUCCESS RATE — strict (NYT)     : {overall.get('success_strict')}")
+    print(f"SUCCESS RATE — relaxed (CWB)    : {overall.get('success_relaxed')}")
     print(f"mean crossings                  : {overall.get('mean_crossings')}")
     print(f"mean crossings / reference      : {overall.get('mean_crossings_vs_ref')}")
     print(f"mean crossing ratio (checked)   : {overall.get('mean_crossing_ratio')}")
@@ -187,7 +189,8 @@ def _print_report(model, overall, by_size):
     print(f"mean |black-square delta|       : {overall.get('mean_abs_black_delta')}")
     print(f"status counts                   : {overall.get('status_counts')}")
     for size, agg in sorted(by_size.items()):
-        print(f"  [size {size}] n={agg['n']} success={agg['success_rate']} "
+        print(f"  [size {size}] n={agg['n']} success(strict/relaxed)="
+              f"{agg['success_strict']}/{agg['success_relaxed']} "
               f"crossings={agg['mean_crossings']} vs_ref={agg['mean_crossings_vs_ref']} "
               f"coverage={agg['mean_coverage']}")
 
@@ -198,7 +201,7 @@ def main() -> None:
     ap.add_argument("--mode", default="program", choices=("program", "direct"),
                     help="endpoint output: program (run in sandbox) or direct layout JSON")
     ap.add_argument("--relaxed", action="store_true",
-                    help="CrossWordBench-style validity (unchecked cells allowed) vs NYT-strict")
+                    help="(deprecated no-op: both strict and relaxed success are always reported)")
     ap.add_argument("--config", default="english")
     ap.add_argument("--split", default=None, help="e.g. 7x7 or 14x14 (default: all)")
     ap.add_argument("--limit", type=int, default=None, help="max puzzles per split")
@@ -226,8 +229,8 @@ def main() -> None:
         work.extend(zip(raw, puzzles))
 
     total = len(work)
-    mode = f"{args.mode}/{'relaxed' if args.relaxed else 'strict'}"
-    print(f"scoring {total} puzzles :: model={args.model} {mode}", flush=True)
+    print(f"scoring {total} puzzles :: model={args.model} mode={args.mode} "
+          f"(reporting both strict + relaxed success)", flush=True)
     results, t0 = [], time.time()
     for i, (row, pz) in enumerate(work, 1):
         runtime_s = None
@@ -245,19 +248,19 @@ def main() -> None:
                 layout, runtime_s = _run_program(code, pz, timeout_s=float(max(8, pz.size)))
         else:
             raise SystemExit(f"unknown --model {args.model}")
-        r = score_layout(layout, pz, runtime_s=runtime_s, relaxed=args.relaxed)
+        r = score_layout(layout, pz, runtime_s=runtime_s)
         results.append(r)
         el = time.time() - t0
         eta = el / i * (total - i)
         print(f"[{i:>3}/{total}] id={pz.puzzle_id:>4} sz{pz.size} {r['status']:<9} "
-              f"ok={r['success']} cross={r['crossings']:<3} cov={r['coverage']:.2f} "
+              f"ok(s/r)={r['success_strict']}/{r['success_relaxed']} "
+              f"cross={r['crossings']:<3} cov={r['coverage']:.2f} "
               f"| {el:4.0f}s elapsed, ETA {eta:4.0f}s", flush=True)
 
     overall = _agg(results)
     by_size = {size: _agg([r for r in results if r["size"] == size])
                for size in sorted({r["size"] for r in results})}
     label = f"{args.model}:{args.mode}" if args.model == "endpoint" else args.model
-    label += " [relaxed]" if args.relaxed else " [strict]"
     _print_report(label, overall, by_size)
 
     if args.out:

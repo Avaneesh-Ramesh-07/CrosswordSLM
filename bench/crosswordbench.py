@@ -157,16 +157,20 @@ def load_puzzles(path: str) -> list:
         return [extract(json.loads(line)) for line in fh if line.strip()]
 
 
-def score_layout(layout, puzzle: Puzzle, runtime_s=None, relaxed=False) -> dict:
-    """Score a model-produced layout against a Puzzle. Returns bench metrics.
+def score_layout(layout, puzzle: Puzzle, runtime_s=None) -> dict:
+    """Score a model-produced layout under BOTH validity modes in one pass.
 
-    `success` is the binary the user cares about (valid crossword using only the
-    supplied words); the rest are the sub-binary nuance metrics. `relaxed` picks
-    CrossWordBench-style validity (unchecked cells allowed) over NYT-strict.
+    The expensive step (generating + running the program) happens once upstream;
+    scoring is pure, so we grade the same layout under strict (NYT) and relaxed
+    (CrossWordBench-style) validity and report both `success_strict` and
+    `success_relaxed`. The nuance metrics (crossings, coverage, black-square
+    delta) are validity-mode-invariant, so they're taken from either pass.
     """
     spec = puzzle.scorer_spec()
-    R = score(layout, spec, word_source=puzzle.words, runtime_s=runtime_s, relaxed=relaxed)
+    strict = score(layout, spec, word_source=puzzle.words, runtime_s=runtime_s, relaxed=False)
+    relax = score(layout, spec, word_source=puzzle.words, runtime_s=runtime_s, relaxed=True)
 
+    R = relax  # nuance fields below are identical across modes
     size = puzzle.size
     white = round(R["fill_density"] * size * size)
     black_actual = size * size - white
@@ -175,8 +179,9 @@ def score_layout(layout, puzzle: Puzzle, runtime_s=None, relaxed=False) -> dict:
         "size": size,
         "difficulty": puzzle.difficulty,
         "status": R["status"],
-        "success": int(R["valid"]),
-        # --- nuance ---
+        "success_strict": int(strict["valid"]),
+        "success_relaxed": int(relax["valid"]),
+        # --- nuance (validity-mode-invariant) ---
         "crossings": R["crossings"],
         "ref_crossings": puzzle.ref_crossings,
         "crossings_vs_ref": round(R["crossings"] / puzzle.ref_crossings, 4) if puzzle.ref_crossings else None,
@@ -186,6 +191,7 @@ def score_layout(layout, puzzle: Puzzle, runtime_s=None, relaxed=False) -> dict:
         "black_target": puzzle.n_black,
         "black_actual": black_actual,
         "black_delta": black_actual - puzzle.n_black,
-        "combined_score": R["combined_score"],
-        "reasons": R["reasons"],
+        "combined_strict": strict["combined_score"],
+        "combined_relaxed": relax["combined_score"],
+        "reasons_relaxed": relax["reasons"],
     }
