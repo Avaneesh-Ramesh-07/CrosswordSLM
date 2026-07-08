@@ -26,7 +26,7 @@ cells = [
 
  (MD, "## 1. Get the code\nClone the repo (set your URL) or upload the project folder and "
       "set `PROJECT_DIR`. The `bench/`, `harness/`, `pipeline/`, and `seeds/` dirs must be present."),
- (CO, 'REPO_URL = "https://github.com/YOUR_USER/YOUR_REPO.git"   # <-- set this, or upload the folder\n'
+ (CO, 'REPO_URL = "https://github.com/Avaneesh-Ramesh-07/CrosswordSLM.git"\n'
       'import os\n'
       '!git clone -q $REPO_URL slm || echo "clone skipped/failed — upload the folder instead"\n'
       'PROJECT_DIR = "/content/slm"   # adjust if you uploaded elsewhere\n'
@@ -49,24 +49,42 @@ cells = [
 
  (MD, "## 4. Serve Qwen3-4B via vLLM\n"
       "T4: keep `--dtype half`. A100/L4: `bfloat16` and a larger `--max-model-len` are fine."),
- (CO, 'import subprocess, sys, time, requests\n'
+ (CO,
+      'import subprocess, sys, time, requests\n'
+      '\n'
       'MODEL = "Qwen/Qwen3-4B"\n'
-      'log = open("vllm.log", "w")\n'
+      'LOG = "vllm.log"\n'
       'server = subprocess.Popen(\n'
       '    [sys.executable, "-m", "vllm.entrypoints.openai.api_server",\n'
       '     "--model", MODEL, "--dtype", "half", "--max-model-len", "8192",\n'
       '     "--gpu-memory-utilization", "0.90", "--port", "8000"],\n'
-      '    stdout=log, stderr=subprocess.STDOUT)\n'
-      'up = False\n'
-      'for _ in range(120):\n'
+      '    stdout=open(LOG, "w"), stderr=subprocess.STDOUT)\n'
+      'print(f"launched vLLM pid={server.pid} for {MODEL}; first run downloads ~8GB…", flush=True)\n'
+      '\n'
+      'def _tail(n=8):\n'
+      '    try:\n'
+      '        with open(LOG) as fh: return "".join(fh.readlines()[-n:]).rstrip()\n'
+      '    except FileNotFoundError: return "(no log yet)"\n'
+      '\n'
+      'start, DEADLINE, up, i = time.time(), 1500, False, 0\n'
+      'while time.time() - start < DEADLINE:\n'
+      '    el = int(time.time() - start)\n'
+      '    rc = server.poll()\n'
+      '    if rc is not None:                       # crashed -> stop now, show why\n'
+      '        print(f"\\n[{el}s] vLLM EXITED rc={rc}. Last log:\\n", flush=True)\n'
+      '        print(_tail(40), flush=True); break\n'
       '    try:\n'
       '        if requests.get("http://localhost:8000/v1/models", timeout=2).ok:\n'
-      '            up = True; break\n'
+      '            up = True; print(f"\\n[{el}s] vLLM UP — {MODEL} ready on :8000", flush=True); break\n'
       '    except Exception:\n'
       '        pass\n'
-      '    time.sleep(10)\n'
-      'print("vLLM up" if up else "NOT up — see vllm.log below")\n'
-      '!tail -n 20 vllm.log'),
+      '    if i % 3 == 0:                           # heartbeat + latest log line ~every 15s\n'
+      '        print(f"[{el:4d}s] loading… | {_tail(1)}", flush=True)\n'
+      '    i += 1; time.sleep(5)\n'
+      'if not up and server.poll() is None:\n'
+      '    print(f"\\n[{int(time.time()-start)}s] TIMEOUT — still not serving.", flush=True)\n'
+      'if not up:\n'
+      '    print("\\n===== tail vllm.log =====\\n" + _tail(40), flush=True)'),
 
  (MD, "## 5. Baselines / anchors (no model needed)\n"
       "`reference` scores each puzzle's OWN grid. Two validity modes:\n"

@@ -57,6 +57,7 @@ class Spec:
     min_word_len: int = MIN_WORD_LEN
     time_budget_s: float = 5.0
     density_target: float = 0.72
+    min_vocab_fraction: float = 0.70  # >=70% of answers must be vocab n crossword-worthy
 
 
 def _norm(word) -> str:
@@ -132,7 +133,7 @@ def _symmetric(white: set, size: int) -> bool:
 
 
 def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
-          scores=None, unscored_default=50, relaxed=False) -> dict:
+          scores=None, unscored_default=50, relaxed=False, vocab_set=None) -> dict:
     """Score one generated crossword against `spec`. Returns a metrics dict.
 
     `word_source`     : iterable of allowed words (topic words + fill list).
@@ -160,6 +161,11 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
         "fill_density": 0.0,
         "fill_quality": 0.0,
         "coverage": 0.0,
+        "vocab_fraction": None,
+        "vocab_ok": True,
+        "filler_fraction": None,
+        "invalid_crossing_frac": 0.0,
+        "invalid_entry_frac": 0.0,
         "runtime_ok": 1.0,
         "symmetry_ok": True,
         "accidental": 0,
@@ -317,6 +323,49 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
         R["fill_quality"] = round(0.6 * (sum(qs) / len(qs)) + 0.4 * min(qs), 4)
     else:
         R["fill_quality"] = 0.0
+
+    # vocab_fraction: fraction of answers that are BOTH vocabulary and crossword-worthy
+    # (i.e. in the clean educational palette). This is the ">70% vocab" criterion; it
+    # is distinct from `coverage`, which tracks the stricter SAT target set.
+    if vocab_set is not None:
+        vset = {_norm(w) for w in vocab_set}
+        if answers:
+            R["vocab_fraction"] = round(sum(1 for w in answers if w in vset) / len(answers), 4)
+        else:
+            R["vocab_fraction"] = 0.0
+        R["vocab_ok"] = R["vocab_fraction"] >= spec.min_vocab_fraction
+        # filler = answers that are NOT vocabulary+crossword-worthy (glue/crosswordese)
+        R["filler_fraction"] = round(1.0 - R["vocab_fraction"], 4)
+
+    # --- graded "invalid connection" metrics ------------------------------------
+    # Meaningful even when the crossword is not fully valid (e.g. a model's output):
+    #   (a) invalid_crossing_frac -- of all cells where an across and a down entry
+    #       intersect, the fraction where the two entries disagree on the letter.
+    #   (b) invalid_entry_frac    -- of all declared entries (>= min length), the
+    #       fraction whose answer is not a real word (not in `allowed`).
+    # is_valid == 0 whenever either is > 0 (the strict checks below subsume them).
+    ga, gd = {}, {}
+
+    def _lay(entries, dr, dc, tgt):
+        for e in entries:
+            try:
+                r0, c0 = int(e["row"]), int(e["col"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            for i, ch in enumerate(_norm(e["answer"])):
+                rr, cc = r0 + dr * i, c0 + dc * i
+                if 0 <= rr < size and 0 <= cc < size:
+                    tgt[(rr, cc)] = ch
+
+    _lay(across, 0, 1, ga)
+    _lay(down, 1, 0, gd)
+    cross = set(ga) & set(gd)
+    if cross:
+        R["invalid_crossing_frac"] = round(sum(1 for c in cross if ga[c] != gd[c]) / len(cross), 4)
+    declared = [e for e in across + down if len(_norm(e["answer"])) >= minlen]
+    if declared:
+        bad = sum(1 for e in declared if _norm(e["answer"]) not in allowed)
+        R["invalid_entry_frac"] = round(bad / len(declared), 4)
 
     if runtime_s is not None:
         b = spec.time_budget_s
