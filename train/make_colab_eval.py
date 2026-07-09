@@ -1,5 +1,9 @@
 """Generate train/colab_eval.ipynb (the CrossWordBench base-model eval run).
 
+STALE / NOT IN USE: this eval notebook is no longer part of the active workflow.
+Kept for reference only; do not rely on it. Eval is done elsewhere.
+
+
 Companion to make_colab.py. This notebook serves Qwen3-4B via vLLM and runs the
 CrossWordBench-derived eval (bench/) INSIDE the Colab session against
 localhost:8000 -- no tunnel. It reports the binary success rate (valid config)
@@ -16,7 +20,10 @@ MD = "markdown"
 CO = "code"
 
 cells = [
- (MD, "# CrossWordBench Eval — Qwen3-4B baseline\n\n"
+ (MD, "> # ⚠️ STALE — NOT IN USE\n"
+      "> This eval notebook is **no longer part of the workflow** and is kept for reference "
+      "only. Do not run it expecting current results; eval is done elsewhere.\n\n"
+      "# CrossWordBench Eval — Qwen3-4B baseline\n\n"
       "Serve **Qwen3-4B** with vLLM and run the CrossWordBench-derived eval in the same "
       "session (against `localhost:8000` — **no tunnel**). Each puzzle's word set + size + "
       "black-square count become a SPEC; the model produces a crossword configuration; we "

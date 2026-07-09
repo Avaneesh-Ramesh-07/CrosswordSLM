@@ -15,7 +15,7 @@ import os
 
 MD, CO = "markdown", "code"
 
-REPO_URL = "https://github.com/Avaneesh-Ramesh-07/<REPO>.git"  # <-- set to your repo
+REPO_URL = "https://github.com/Avaneesh-Ramesh-07/CrosswordSLM.git"
 
 cells = [
  (MD, "# QLoRA fine-tune: Qwen3-4B → crossword-generator SLM\n\n"
@@ -39,6 +39,32 @@ cells = [
       "`transformers 4.53`, and `gradio` is **not used** anywhere in this notebook, so the "
       "conflict is cosmetic -- the install still succeeds. **Do not upgrade "
       "`huggingface-hub`** (it would break `transformers`)."),
+
+ (MD, "## 1b. Preflight: confirm the GPU **before** training\n"
+      "Colab Pro only helps if you actually got a bigger card — Pro can still hand you a "
+      "~16 GB T4, which will OOM this config (especially the fp16 merge in cell 8). This "
+      "prints the GPU name + free VRAM and warns if you're under ~20 GB. Want **L4 (24 GB)** "
+      "or **A100 (40 GB)**: Runtime -> Change runtime type."),
+ (CO, 'import torch\n'
+      'assert torch.cuda.is_available(), "No GPU attached -- Runtime > Change runtime type > GPU (L4 or A100)."\n'
+      'free_b, total_b = torch.cuda.mem_get_info()\n'
+      'gb = 1024 ** 3\n'
+      'name = torch.cuda.get_device_properties(0).name\n'
+      'total_gb, free_gb = total_b / gb, free_b / gb\n'
+      'print(f"GPU: {name}")\n'
+      'print(f"VRAM: {total_gb:.1f} GB total | {free_gb:.1f} GB free")\n'
+      'print(f"bf16 supported: {torch.cuda.is_bf16_supported()}")\n\n'
+      '# 4-bit Qwen3-4B QLoRA (seq-len 4096) + the fp16 merge (~8 GB) wants >= ~20 GB.\n'
+      'if total_gb < 20:\n'
+      '    print()\n'
+      '    print("=" * 64)\n'
+      '    print(f"WARNING: only {total_gb:.0f} GB VRAM -- this looks like a T4.")\n'
+      '    print("This config will likely OOM (especially the fp16 merge in cell 8).")\n'
+      '    print("Fix: Runtime > Change runtime type > L4 (24GB) or A100 (40GB),")\n'
+      '    print("     then Runtime > Restart session and rerun from cell 1.")\n'
+      '    print("=" * 64)\n'
+      'else:\n'
+      '    print(f"OK -- {total_gb:.0f} GB fits 4-bit Qwen3-4B QLoRA (can raise seq-len toward 8192).")'),
 
  (MD, "## 2. Get the data\n"
       "**Do ONE of these** (the notebook will not invent data):\n"
@@ -80,7 +106,7 @@ cells = [
       'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
       '# programs are long (a full generator); give the sequence room\n'
       'max_seq_length = 4096\n\n'
-      'num_train_epochs = 3\n'
+      'num_train_epochs = 10\n'
       'per_device_train_batch_size = 1\n'
       'per_device_eval_batch_size  = 1\n'
       'gradient_accumulation_steps = 16   # effective batch ~16\n'
