@@ -49,27 +49,40 @@ def main():
         "sB": spec("sB", 9, True, "dev"),
         "sC": spec("sC", 7, True, "train"),
     }
+    def met(valid, combined, filler=0.0, runtime=2.0):
+        return {"valid": valid, "combined_score": combined, "filler_fraction": filler,
+                "invalid_crossing_frac": 0.0, "invalid_entry_frac": 0.0, "runtime_s": runtime}
+
     harvest = [
-        {"spec_id": "sA", "code": CODE1, "metrics": {"valid": 1.0, "combined_score": 0.90},
+        # valid, clean, fast, within budget -> SOLUTION (combined no longer gates)
+        {"spec_id": "sA", "code": CODE1, "metrics": met(1.0, 0.60),
          "artifacts": {"best_draw": bd(valid=1, fill_density=0.80, reasons=[])}},
-        {"spec_id": "sB", "code": CODE2, "metrics": {"valid": 1.0, "combined_score": 0.60},
+        # valid but filler 0.5 > 0.30 -> misses quality bar -> HINDSIGHT_DENSITY
+        {"spec_id": "sB", "code": CODE2, "metrics": met(1.0, 0.90, filler=0.5),
          "artifacts": {"best_draw": bd(valid=1, fill_density=0.70, reasons=[])}},
-        {"spec_id": "sC", "code": CODE3, "metrics": {"valid": 0.0, "combined_score": 0.40},
+        # invalid, symmetry the only failing check -> HINDSIGHT_SYMMETRY
+        {"spec_id": "sC", "code": CODE3, "metrics": met(0.0, 0.40),
          "artifacts": {"best_draw": bd(valid=0, symmetry_ok=False, fill_density=0.72, reasons=[SYMMETRY_REASON])}},
-        {"spec_id": "sA", "code": CODE4, "metrics": {"valid": 0.0, "combined_score": 0.20},
+        # invalid, crossing conflict -> NEGATIVE (kept + labeled)
+        {"spec_id": "sA", "code": CODE4, "metrics": met(0.0, 0.20),
          "artifacts": {"best_draw": bd(valid=0, reasons=["crossing letter conflict"])}},
-        {"spec_id": "sC", "code": CODE1, "metrics": {"valid": 1.0, "combined_score": 0.90},
-         "artifacts": {"best_draw": bd(valid=1, fill_density=0.80, reasons=[])}},  # dup of CODE1
+        # dup of CODE1 solution -> capped out by per_program_cap=1
+        {"spec_id": "sC", "code": CODE1, "metrics": met(1.0, 0.60),
+         "artifacts": {"best_draw": bd(valid=1, fill_density=0.80, reasons=[])}},
     ]
 
-    out = process_harvest(harvest, specs, accept_threshold=0.85, per_program_cap=1)
-    print("kind_counts:", out["kind_counts"], "| negatives:", out["n_negatives"])
+    out = process_harvest(harvest, specs, per_program_cap=1)
+    print("kind_counts:", out["kind_counts"], "| negatives:", out["n_negatives"],
+          "| failures:", out["failure_counts"])
 
     check("3 solutions (dup capped out)", out["n_solutions"] == 3, str(out["n_solutions"]))
-    check("one plain solution", out["kind_counts"].get("solution") == 1, str(out["kind_counts"]))
-    check("one density hindsight", out["kind_counts"].get("hindsight_density") == 1)
+    check("one plain solution (metric-based, not combined)", out["kind_counts"].get("solution") == 1, str(out["kind_counts"]))
+    check("one density hindsight (filler>0.30)", out["kind_counts"].get("hindsight_density") == 1)
     check("one symmetry hindsight", out["kind_counts"].get("hindsight_symmetry") == 1)
     check("one negative (conflict)", out["n_negatives"] == 1 and "crossing letter conflict" in out["negatives"][0]["reasons"][0])
+    check("negative is labeled crossing_conflict", out["negatives"][0]["failure_category"] == "crossing_conflict", out["negatives"][0]["failure_category"])
+    check("negative carries effective_spec + metrics", "effective_spec" in out["negatives"][0] and "filler_fraction" in out["negatives"][0]["metrics"])
+    check("solutions carry effective_spec", all("effective_spec" in s for s in out["solutions"]))
     check("dedup: CODE1 counted once", sum(1 for s in out["solutions"] if s["program_hash"] == ast_hash(CODE1)) == 1)
 
     sym_row = next(s for s in out["solutions"] if s["kind"] == "hindsight_symmetry")
@@ -89,7 +102,7 @@ def main():
     print("split counts:", counts)
     check("train has 2 (sA + sC)", counts["train"] == 2, str(counts))
     check("dev has 1 (sB)", counts["dev"] == 1)
-    check("test has 0", counts["test"] == 0)
+    check("eval has 0 (held-out split, none here)", counts["eval"] == 0)
     train_rows = [json.loads(x) for x in open(os.path.join(tmp, "train.jsonl"), encoding="utf-8")]
     check("train.jsonl parses to chat examples", all("messages" in r for r in train_rows) and len(train_rows) == 2)
 

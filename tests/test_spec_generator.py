@@ -34,10 +34,10 @@ def test_stratification_and_splits():
     sizes = {s.size for s in specs}
     check("all sizes represented", sizes == set(SIZES), str(sorted(sizes)))
     splits = {s.split for s in specs}
-    check("splits are train/dev/test only", splits <= {"train", "dev", "test"}, str(splits))
+    check("splits are train/dev/eval only", splits <= {"train", "dev", "eval"}, str(splits))
     check("train present", "train" in splits)
     check("dev present", "dev" in splits)
-    check("test present", "test" in splits)
+    check("eval present (held-out, never trained)", "eval" in splits)
 
 
 def test_render_contents():

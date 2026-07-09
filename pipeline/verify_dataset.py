@@ -21,8 +21,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.oe_evaluator import evaluate_code
-from pipeline.spec_generator import load_specs
-from pipeline.word_source import build_education_source
+from pipeline.spec_generator import SpecRecord, load_specs
+from pipeline.word_source import build_clean_education_source, build_education_source
 
 
 def extract_code(content: str) -> str:
@@ -41,35 +41,64 @@ def main():
     args = ap.parse_args()
 
     specs = load_specs(args.specs)
-    edu = build_education_source(include_common_fill=True)
+    # Prefer the clean educational palette (enables filler_fraction / vocab metrics);
+    # fall back to the plain education source if wordfreq/dict aren't available.
+    try:
+        edu = build_clean_education_source()
+        vocab_set = edu["clean_set"]
+    except Exception as exc:
+        print(f"(clean palette unavailable: {exc}; using education source, no filler metric)")
+        edu = build_education_source(include_common_fill=True)
+        vocab_set = set(edu["targets"]) | set(edu["fill_words"])
     theme, fill, scores = edu["targets"], edu["fill_words"], edu["scores"]
     word_source = {"theme": theme, "fill": fill}
 
     rows = [json.loads(l) for l in open(args.dataset, encoding="utf-8")]
-    print(f"verifying {len(rows)} examples from {args.dataset}\n")
+    print(f"verifying {len(rows)} examples from {args.dataset}")
+    print(f"palette: {edu['n_allowed']:,} words ({edu['n_vocab']:,} SAT)\n")
 
     n_valid = 0
     failures = []
+    agg = {"filler": [], "inv_cross": [], "inv_entry": [], "runtime": []}
     for i, row in enumerate(rows):
         code = extract_code(row["messages"][2]["content"])
-        spec_id = row["meta"]["spec_id"]
-        rec = specs.get(spec_id)
+        meta = row["meta"]
+        spec_id = meta["spec_id"]
+        # Prefer the EFFECTIVE (possibly-relaxed) spec the example was trained on, so
+        # hindsight rows aren't re-checked against un-relaxed original constraints.
+        eff = meta.get("effective_spec")
+        rec = SpecRecord(**eff) if eff else specs.get(spec_id)
         if rec is None:
             print(f"[{i:2d}] {spec_id}: SPEC NOT FOUND"); failures.append(i); continue
         spec = rec.to_scorer_spec(topic_words=theme)
-        out = evaluate_code(code, spec, word_source, scores=scores, n_draws=1)
+        out = evaluate_code(code, spec, word_source, scores=scores, n_draws=1, vocab_set=vocab_set)
         m = out["metrics"]
         bd = out["artifacts"]["best_draw"]
         ok = int(round(m["valid"])) == 1
         n_valid += ok
+        agg["filler"].append(m["filler_fraction"])
+        agg["inv_cross"].append(m["invalid_crossing_frac"])
+        agg["inv_entry"].append(m["invalid_entry_frac"])
+        agg["runtime"].append(m["runtime_s"])
         tag = "OK " if ok else "FAIL"
-        print(f"[{i:2d}] {tag} {spec_id} size={rec.size} prog={row['meta']['program_hash'][:8]} "
-              f"valid={m['valid']} score={m['combined_score']} cov={m['coverage']} "
-              + ("" if ok else f"reasons={bd.get('reasons')}"))
+        print(f"[{i:2d}] {tag} {spec_id} size={rec.size} "
+              f"is_valid={int(round(m['valid']))} "
+              f"filler={m['filler_fraction']*100:.0f}% "
+              f"inv_cross={m['invalid_crossing_frac']*100:.1f}% "
+              f"inv_entry={m['invalid_entry_frac']*100:.1f}% "
+              f"runtime={m['runtime_s']:.2f}s"
+              + ("" if ok else f"  reasons={bd.get('reasons')}"))
         if not ok:
             failures.append(i)
 
-    print(f"\n{n_valid}/{len(rows)} examples produce a valid crossword.")
+    def _avg(xs):
+        return sum(xs) / len(xs) if xs else 0.0
+
+    print(f"\n{n_valid}/{len(rows)} examples are fully valid (is_valid=1).")
+    print(f"means: filler={_avg(agg['filler'])*100:.0f}%  "
+          f"invalid_crossings={_avg(agg['inv_cross'])*100:.1f}%  "
+          f"invalid_entries={_avg(agg['inv_entry'])*100:.1f}%  "
+          f"runtime={_avg(agg['runtime']):.2f}s")
     if failures:
         print(f"failing indices: {failures}")
 

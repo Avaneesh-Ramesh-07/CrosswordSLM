@@ -1,0 +1,42 @@
+{
+  "cov=0.2|fil=0.0": {
+    "program_hash": "b77d7932f2a7b6ab",
+    "gen": "bulk",
+    "combined_score": 0.7169,
+    "coverage": 0.2273,
+    "filler_fraction": 0.0,
+    "fill_density": 0.8367,
+    "runtime_s": 0.148,
+    "code_file": "b77d7932f2a7b6ab.py"
+  },
+  "cov=0.1|fil=0.0": {
+    "program_hash": "c6e4dfd0eda56f82",
+    "gen": "bulk",
+    "combined_score": 0.6975,
+    "coverage": 0.15,
+    "filler_fraction": 0.0,
+    "fill_density": 0.8776,
+    "runtime_s": 0.8808,
+    "code_file": "c6e4dfd0eda56f82.py"
+  },
+  "cov=0.0|fil=0.0": {
+    "program_hash": "e782e38e194229e9",
+    "gen": "bulk",
+    "combined_score": 0.6606,
+    "coverage": 0.0455,
+    "filler_fraction": 0.0,
+    "fill_density": 0.8367,
+    "runtime_s": 0.0519,
+    "code_file": "e782e38e194229e9.py"
+  },
+  "cov=0.3|fil=0.0": {
+    "program_hash": "b77d7932f2a7b6ab",
+    "gen": "bulk",
+    "combined_score": 0.7249,
+    "coverage": 0.2727,
+    "filler_fraction": 0.0,
+    "fill_density": 0.8367,
+    "runtime_s": 0.2101,
+    "code_file": "b77d7932f2a7b6ab.py"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "gen": 3,
+  "programs": [
+    {
+      "name": "theme_beam",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "beam",
+        "theme_first",
+        "pattern_index",
+        "forward_check"
+      ],
+      "parents": [
+        "beam_search",
+        "vocab_first"
+      ],
+      "notes": "beam search + theme-weighted scoring (packs SAT words while beam keeps feasibility)"
+    },
+    {
+      "name": "ac3_lcv",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "MRV",
+        "LCV",
+        "theme_first"
+      ],
+      "parents": [
+        "csp_ac3"
+      ],
+      "notes": "AC-3/MAC + true least-constraining-value ordering + theme-first primary"
+    },
+    {
+      "name": "mrv_fc_theme",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "MRV",
+        "forward_check",
+        "pattern_index",
+        "theme_first"
+      ],
+      "parents": [],
+      "notes": "gen2 winner (baseline)"
+    },
+    {
+      "name": "reference_v1",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "MRV",
+        "forward_check",
+        "pattern_index"
+      ],
+      "parents": [],
+      "notes": "seed reliability baseline"
+    }
+  ]
+}

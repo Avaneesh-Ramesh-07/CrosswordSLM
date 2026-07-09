@@ -1,0 +1,95 @@
+{
+  "gen": 1,
+  "programs": [
+    {
+      "name": "ac3_theme",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "theme_first",
+        "greedy_restart"
+      ],
+      "parents": [
+        "csp_ac3",
+        "vocab_first"
+      ],
+      "notes": "AC-3 look-ahead + theme-first longest-slot coverage on random construction"
+    },
+    {
+      "name": "weak_greedy",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "greedy_restart"
+      ],
+      "parents": [
+        "reference_v1"
+      ],
+      "notes": "deliberately weak: no propagation, one structure, tiny budget (negative control)"
+    },
+    {
+      "name": "csp_ac3",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "MRV"
+      ],
+      "parents": [],
+      "notes": "seed: maintained arc consistency"
+    },
+    {
+      "name": "reference_v1",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "MRV",
+        "forward_check",
+        "pattern_index",
+        "greedy_restart"
+      ],
+      "parents": [],
+      "notes": "seed: greedy MRV + forward-checking + pattern index"
+    },
+    {
+      "name": "beam_search",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "beam",
+        "LCV",
+        "pattern_index"
+      ],
+      "parents": [],
+      "notes": "seed: beam search, most-crossed-first"
+    },
+    {
+      "name": "vocab_first",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "theme_first",
+        "MRV",
+        "forward_check",
+        "pattern_index"
+      ],
+      "parents": [],
+      "notes": "teacher: theme-first longest-slot coverage"
+    }
+  ]
+}

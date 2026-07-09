@@ -127,6 +127,52 @@ def run_candidate(code: str, spec: dict, timeout_s: float = 5.0, mem_mb: int = 1
     return {"status": "ok", "result": payload.get("result"), "runtime_s": round(runtime_s, 4), "detail": "", "stderr": err[-2000:]}
 
 
+def run_candidate_inprocess(code: str, spec: dict, timeout_s: float = 5.0) -> dict:
+    """FAST path for TRUSTED (teacher-authored) code: exec + call the generator
+    IN-PROCESS -- no subprocess spawn and no word_source re-serialization (the
+    ~25k-word palette is passed as a live Python object). Same return shape as
+    run_candidate. Relies on the program's own wall-clock deadline; a daemon-thread
+    join is a soft timeout backstop. NOT a security boundary -- keep run_candidate
+    for untrusted model output.
+    """
+    import threading
+
+    ok, status, detail = static_gate(code)
+    if not ok:
+        return _fail(status, detail)
+
+    box = {}
+
+    def _work():
+        start = time.perf_counter()
+        try:
+            ns: dict = {}
+            exec(compile(code, "<candidate>", "exec"), ns)
+            fn = ns.get("generate_crossword")
+            if not callable(fn):
+                box["r"] = _fail("no_function", "generate_crossword() not defined")
+                return
+            result = fn(spec["topic"], spec["word_source"], spec["size"])
+            box["r"] = {"status": "ok", "result": result,
+                        "runtime_s": round(time.perf_counter() - start, 4), "detail": "", "stderr": ""}
+        except MemoryError:
+            box["r"] = {"status": "oom", "result": None,
+                        "runtime_s": round(time.perf_counter() - start, 4), "detail": "", "stderr": ""}
+        except Exception as exc:  # noqa: BLE001 - taxonomy bucket
+            box["r"] = {"status": "exception", "result": None,
+                        "runtime_s": round(time.perf_counter() - start, 4),
+                        "detail": repr(exc)[:200], "stderr": repr(exc)[:2000]}
+
+    t0 = time.perf_counter()
+    th = threading.Thread(target=_work, daemon=True)
+    th.start()
+    th.join(timeout_s)
+    if th.is_alive():  # program ignored its own deadline -> soft-timeout (thread leaks, daemon)
+        return {"status": "timeout", "result": None, "runtime_s": round(time.perf_counter() - t0, 4),
+                "detail": "in-process soft timeout", "stderr": ""}
+    return box.get("r", _fail("exception", "no result"))
+
+
 def _kill(proc):
     try:
         if _IS_POSIX:

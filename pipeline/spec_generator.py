@@ -34,7 +34,9 @@ SIZES = [5, 7, 9, 11, 13, 15]
 
 # Per-size targets (white-square fraction) and time budgets, roughly NYT-shaped.
 DENSITY_TARGET = {5: 0.90, 7: 0.80, 9: 0.76, 11: 0.74, 13: 0.72, 15: 0.72}
-TIME_BUDGET_S = {5: 2, 7: 3, 9: 4, 11: 5, 13: 7, 15: 10}
+# Big grids legitimately take several seconds to CSP-fill; budgets are generous
+# enough that the sandbox timeout (>= 2x budget) never kills a working generator.
+TIME_BUDGET_S = {5: 2, 7: 3, 9: 5, 11: 12, 13: 20, 15: 30}
 
 TOPICS = [
     "general vocabulary", "SAT vocabulary", "high-school vocabulary", "science",
@@ -44,16 +46,24 @@ DIFFICULTY = ["easy", "medium", "hard"]
 
 # The diversity lever: naming a technique lets the same spec map to a different
 # valid program family (greedy vs. AC-3 vs. beam), which fights memorization.
-HINT_POOL = [
-    "MRV (minimum-remaining-values) slot ordering",
-    "AC-3 arc-consistency propagation",
-    "forward checking after each placement",
-    "least-constraining-value ordering",
-    "bitset letter domains for fast intersection",
-    "a pattern index keyed by (length, position, letter)",
-    "greedy placement with random restarts",
-    "maintaining arc consistency (MAC) during search",
-]
+# TAG_TO_HINT maps scorecard heuristic TAGS to the rendered phrase, so learnings
+# ("AC3 works best") can up-weight the matching hint in future generations.
+TAG_TO_HINT = {
+    "MRV": "MRV (minimum-remaining-values) slot ordering",
+    "AC3": "AC-3 arc-consistency propagation",
+    "MAC": "maintaining arc consistency (MAC) during search",
+    "forward_check": "forward checking after each placement",
+    "LCV": "least-constraining-value ordering",
+    "bitset": "bitset letter domains for fast intersection",
+    "pattern_index": "a pattern index keyed by (length, position, letter)",
+    "greedy_restart": "greedy placement with random restarts",
+    "template": "a pre-verified grid-template library",
+    "theme_first": "theme-first ordering to seat target vocabulary in long slots",
+    "two_phase": "two-phase filling: guarantee validity first, then chase coverage",
+    "subdeadline_restart": "short per-attempt budgets with random restarts",
+    "beam": "beam search over partial fills",
+}
+HINT_POOL = list(TAG_TO_HINT.values())
 
 _SIGNATURE_BLOCK = (
     "Write a single self-contained Python function:\n"
@@ -120,12 +130,50 @@ def render_spec(rec: SpecRecord) -> str:
     )
 
 
-def sample_spec(rng: random.Random, spec_id: str, size: int) -> SpecRecord:
+def load_hint_weights(scorecard_path) -> dict:
+    """Map a generation scorecard's per-heuristic composites to per-HINT_POOL-phrase
+    weights, so hints that produced good fillers are sampled more often next time.
+    Phrases with no signal keep weight 1.0. Weight = max(0.1, mean_composite + 1)."""
+    import json
+    with open(scorecard_path, encoding="utf-8") as fh:
+        card = json.load(fh)
+    weights = {phrase: 1.0 for phrase in HINT_POOL}
+    for row in card.get("per_heuristic", []):
+        phrase = TAG_TO_HINT.get(row["heuristic"])
+        if phrase:
+            weights[phrase] = max(0.1, round(row["mean_composite"] + 1.0, 3))
+    return weights
+
+
+def _weighted_sample(rng: random.Random, items, weights, k):
+    """Weighted sampling WITHOUT replacement."""
+    items, weights = list(items), list(weights)
+    chosen = []
+    for _ in range(min(k, len(items))):
+        total = sum(weights)
+        if total <= 0:
+            i = rng.randrange(len(items))
+        else:
+            r, acc, i = rng.random() * total, 0.0, len(items) - 1
+            for j, w in enumerate(weights):
+                acc += w
+                if r <= acc:
+                    i = j
+                    break
+        chosen.append(items.pop(i))
+        weights.pop(i)
+    return chosen
+
+
+def sample_spec(rng: random.Random, spec_id: str, size: int, hint_weights=None) -> SpecRecord:
     require_symmetry = size <= 5 or rng.random() > 0.15  # mostly symmetric
     difficulty = rng.choice(DIFFICULTY)
     density = round(DENSITY_TARGET[size] + rng.choice([-0.02, 0.0, 0.0, 0.02]), 2)
     n_hints = rng.choice([0, 1, 1, 2, 2, 3])
-    hints = rng.sample(HINT_POOL, k=n_hints)
+    if hint_weights:
+        hints = _weighted_sample(rng, HINT_POOL, [hint_weights.get(h, 1.0) for h in HINT_POOL], n_hints)
+    else:
+        hints = rng.sample(HINT_POOL, k=n_hints)
     return SpecRecord(
         spec_id=spec_id,
         size=size,
@@ -139,20 +187,27 @@ def sample_spec(rng: random.Random, spec_id: str, size: int) -> SpecRecord:
     )
 
 
-def generate_specs(n: int, seed: int = 0, sizes=SIZES, dev_frac=0.1, test_frac=0.1) -> list:
-    """Return `n` SpecRecords, stratified round-robin over `sizes`, with a
-    per-record train/dev/test split (stratified so every size appears in each).
+def generate_specs(n: int, seed: int = 0, sizes=SIZES, dev_frac=0.1, eval_frac=0.1,
+                   hint_weights=None) -> list:
+    """Return `n` SpecRecords, stratified round-robin over `sizes`, with a per-record
+    split over held-out SPECS:
+      - train (~80%): the SFT corpus (trained on).
+      - dev   (~10%): validation / early-stopping (no gradient updates, but used for
+                      model selection).
+      - eval  (~10%): a PRISTINE held-out set -- never trained on AND never used for
+                      tuning; touched only for the final base-vs-tuned comparison.
 
-    Held-out program-families and held-out word-sources are applied later, in
-    the harvest/build step; this split covers held-out SPECS.
+    `hint_weights` (from load_hint_weights) biases which heuristic hints appear,
+    carrying a prior generation's learnings forward. Held-out program-families and
+    word-sources are additional contamination controls applied later.
     """
     rng = random.Random(seed)
     specs = []
     for i in range(n):
         size = sizes[i % len(sizes)]
-        rec = sample_spec(rng, f"s{i:05d}", size)
+        rec = sample_spec(rng, f"s{i:05d}", size, hint_weights=hint_weights)
         r = rng.random()
-        rec.split = "dev" if r < dev_frac else ("test" if r < dev_frac + test_frac else "train")
+        rec.split = "dev" if r < dev_frac else ("eval" if r < dev_frac + eval_frac else "train")
         specs.append(rec)
     return specs
 

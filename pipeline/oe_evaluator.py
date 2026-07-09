@@ -76,19 +76,33 @@ def _mean(results, key):
     return round(sum(r.get(key, 0.0) or 0.0 for r in results) / len(results), 4)
 
 
-def evaluate_code(code: str, spec: Spec, word_source, scores=None, n_draws=1, seed=0, cap=None) -> dict:
-    """Run + score a candidate across draws. Returns {metrics, artifacts, fuzz}."""
+def evaluate_code(code: str, spec: Spec, word_source, scores=None, n_draws=1, seed=0, cap=None,
+                  vocab_set=None, quality_penalty=True, in_process=False) -> dict:
+    """Run + score a candidate across draws. Returns {metrics, artifacts, fuzz}.
+
+    quality_penalty=True (the fitness path) shapes combined_score to penalize filler
+    words + invalid connections; it is a no-op when vocab_set is None and the grid
+    is valid, so existing tests are unaffected. in_process=True uses the fast
+    non-sandboxed runner (trusted teacher code only)."""
     draws = make_draws(spec, word_source, n_draws=n_draws, seed=seed, cap=cap)
     timeout_s = max(spec.time_budget_s * 2.0, spec.time_budget_s + 3.0)
-    fuzz = fuzz_verify(code, draws, scores=scores, timeout_s=timeout_s, mem_mb=1536)
+    fuzz = fuzz_verify(code, draws, scores=scores, timeout_s=timeout_s, mem_mb=1536,
+                       vocab_set=vocab_set, quality_penalty=quality_penalty, in_process=in_process)
     results = fuzz["results"]
 
     metrics = {
         "combined_score": fuzz["mean_score"],   # OpenEvolve fitness
-        "valid": _mean(results, "valid"),        # validity rate across draws
+        "valid": _mean(results, "valid"),        # validity rate across draws (is_valid)
         "fill_density": _mean(results, "fill_density"),   # feature dim
         "coverage": _mean(results, "coverage"),           # feature dim
         "fill_quality": _mean(results, "fill_quality"),
+        # crossword-quality metrics (the reframed headline set)
+        "filler_fraction": _mean(results, "filler_fraction"),
+        "invalid_crossing_frac": _mean(results, "invalid_crossing_frac"),
+        "invalid_entry_frac": _mean(results, "invalid_entry_frac"),
+        "crossings": _mean(results, "crossings"),         # # checked (interlocking) cells
+        "n_entries": _mean(results, "n_entries"),         # # across+down connections
+        "runtime_s": _mean(results, "runtime_s"),         # wall-clock fill time
         "runtime_ok": _mean(results, "runtime_ok"),
         "worst_score": fuzz["min_score"],
     }
@@ -154,8 +168,12 @@ def evaluate(program_path):
     theme = problem.get("theme")
     if theme is not None:
         word_source = {"theme": theme, "fill": problem.get("fill", [])}
+        # vocab n crossword-worthy set = the whole clean palette (theme u fill);
+        # enables the filler_fraction metric (answers outside it are filler).
+        vocab_set = set(theme) | set(problem.get("fill", []))
     else:
         word_source = problem["word_source"]
+        vocab_set = None
     out = evaluate_code(
         code, spec,
         word_source=word_source,
@@ -163,7 +181,17 @@ def evaluate(program_path):
         n_draws=problem.get("n_draws", 1),
         seed=problem.get("seed", 0),
         cap=problem.get("cap"),
+        vocab_set=vocab_set,
+        in_process=problem.get("in_process", False),
     )
+    # Echo the spec's heuristic hints (+ the hard quality rule) back to OpenEvolve as
+    # textual feedback, so learnings actually steer the LLM's next candidate.
+    hints = problem.get("heuristic_hints") or []
+    if hints:
+        out["artifacts"]["hint"] = (
+            "Consider techniques such as " + ", ".join(hints) + ". "
+            "Every entry must be a real word from word_source; minimize filler/crosswordese."
+        )
     _harvest(os.environ.get(HARVEST_ENV), problem.get("spec_id", "?"), code, out)
 
     metrics, artifacts = out["metrics"], out["artifacts"]

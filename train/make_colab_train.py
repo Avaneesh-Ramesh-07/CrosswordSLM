@@ -1,0 +1,213 @@
+"""Generate train/colab_train_qlora.ipynb — QLoRA fine-tune of Qwen3-4B on our SFT data.
+
+Adapted from the standard Llama-2 QLoRA SFT notebook (training_example.ipynb), but:
+  * base model = Qwen3-4B-Instruct (not Llama-2), modern transformers/trl/peft
+  * dataset = our chat JSONL (data/sft/{train,dev,eval}.jsonl), size-upsampled
+  * RESPONSE-ONLY loss (mask system+user; train only on the assistant program)
+  * dev split used for in-training validation; eval split left untouched
+  * save LoRA + merged fp16 model; points to colab_eval.ipynb for base-vs-tuned eval
+
+    python train/make_colab_train.py
+"""
+
+import json
+import os
+
+MD, CO = "markdown", "code"
+
+REPO_URL = "https://github.com/Avaneesh-Ramesh-07/<REPO>.git"  # <-- set to your repo
+
+cells = [
+ (MD, "# QLoRA fine-tune: Qwen3-4B → crossword-generator SLM\n\n"
+      "Distills the (Claude + verifier + scaffolding) pipeline into one-shot generation. "
+      "Trains on `data/sft/train.jsonl` (chat: fixed system contract → minimal size-routed "
+      "user prompt → verified assistant program), **response-only loss**, dev for validation, "
+      "`eval` held out for the base-vs-tuned test (see `colab_eval.ipynb`)."),
+
+ (MD, "## 1. Install (Qwen3 needs recent transformers; the Llama-2-era pins won't load it)"),
+ (CO, "!pip install -q -U 'transformers>=4.51.0' 'trl>=0.12.0' 'peft>=0.13.0' "
+      "'bitsandbytes>=0.44.0' 'accelerate>=1.0.0' 'datasets>=3.0.0'"),
+
+ (MD, "## 2. Get the data\n"
+      "Either clone the repo and (re)build the merged, upsampled splits, **or** upload "
+      "`train.jsonl`/`dev.jsonl`/`eval.jsonl` yourself and set `DATA_DIR` to their folder."),
+ (CO, f'REPO_URL = "{REPO_URL}"\n'
+      'import os\n'
+      'if not os.path.exists("slm"):\n'
+      '    !git clone -q $REPO_URL slm\n'
+      '# rebuild consolidated + upsampled splits (idempotent)\n'
+      '!cd slm && python pipeline/merge_dataset.py --upsample 11=3,15=3\n'
+      'DATA_DIR = "slm/data/sft"   # <-- or point at a folder you uploaded\n'
+      'print("data dir:", DATA_DIR, os.listdir(DATA_DIR))'),
+
+ (MD, "## 3. Config"),
+ (CO, '# Qwen3-4B instruct. Confirm the exact HF id (alts: "Qwen/Qwen3-4B",\n'
+      '# "Qwen/Qwen3-4B-Instruct"). Start from Instruct for fast SFT.\n'
+      'model_name  = "Qwen/Qwen3-4B-Instruct-2507"  # base model to fine-tune FROM\n'
+      'adapter_dir = "qwen3-4b-crossword-qlora"      # OUTPUT: trained LoRA adapter dir (merged -> adapter_dir + "-merged")\n'
+      'output_dir  = "results"                       # trainer checkpoints + logs\n\n'
+      '# QLoRA / LoRA\n'
+      'lora_r, lora_alpha, lora_dropout = 32, 64, 0.05\n'
+      '# Qwen attention + MLP projections\n'
+      'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
+      '# programs are long (a full generator); give the sequence room\n'
+      'max_seq_length = 4096\n\n'
+      'num_train_epochs = 3\n'
+      'per_device_train_batch_size = 1\n'
+      'per_device_eval_batch_size  = 1\n'
+      'gradient_accumulation_steps = 16   # effective batch ~16\n'
+      'learning_rate = 2e-4\n'
+      'lr_scheduler_type = "cosine"\n'
+      'warmup_ratio = 0.03\n'
+      'weight_decay = 0.0\n'
+      'logging_steps = 10'),
+
+ (MD, "## 4. Load Qwen3-4B in 4-bit (QLoRA) + LoRA adapters"),
+ (CO, 'import torch\n'
+      'from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig\n'
+      'from peft import LoraConfig, prepare_model_for_kbit_training\n\n'
+      'bnb_config = BitsAndBytesConfig(\n'
+      '    load_in_4bit=True,\n'
+      '    bnb_4bit_quant_type="nf4",\n'
+      '    bnb_4bit_compute_dtype=torch.bfloat16,\n'
+      '    bnb_4bit_use_double_quant=True,\n'
+      ')\n'
+      'tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)\n'
+      'if tokenizer.pad_token is None:\n'
+      '    tokenizer.pad_token = tokenizer.eos_token\n'
+      'tokenizer.padding_side = "right"\n\n'
+      'model = AutoModelForCausalLM.from_pretrained(\n'
+      '    model_name, quantization_config=bnb_config, device_map={"": 0},\n'
+      '    torch_dtype=torch.bfloat16, trust_remote_code=True,\n'
+      ')\n'
+      'model.config.use_cache = False\n'
+      'model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)\n\n'
+      'peft_config = LoraConfig(\n'
+      '    r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,\n'
+      '    target_modules=target_modules, bias="none", task_type="CAUSAL_LM",\n'
+      ')'),
+
+ (MD, "## 5. Load data + render the Qwen chat template\n"
+      "Each row is `{messages:[system,user,assistant]}`. We render it with the model's own "
+      "chat template into a `text` field; the response-only collator (next cell) then masks "
+      "everything up to the assistant turn so loss is computed **only on the program**."),
+ (CO, 'from datasets import load_dataset\n\n'
+      'ds = load_dataset("json", data_files={\n'
+      '    "train": f"{DATA_DIR}/train.jsonl",\n'
+      '    "dev":   f"{DATA_DIR}/dev.jsonl",\n'
+      '}, )\n\n'
+      'def render(row):\n'
+      '    # add_generation_prompt=False -> include the assistant turn as the target\n'
+      '    return {"text": tokenizer.apply_chat_template(row["messages"], tokenize=False,\n'
+      '                                                   add_generation_prompt=False)}\n\n'
+      'ds = ds.map(render, remove_columns=[c for c in ds["train"].column_names if c != "text"])\n'
+      'print(ds)\n'
+      'print("\\n--- one rendered example (head) ---\\n", ds["train"][0]["text"][:600])'),
+
+ (MD, "## 6. Response-only loss\n"
+      "Qwen renders the assistant turn after `<|im_start|>assistant\\n`. Masking up to that "
+      "marker means gradients flow only through the generated program, not the (fixed) system "
+      "contract or user prompt."),
+ (CO, 'from trl import DataCollatorForCompletionOnlyLM\n'
+      'response_template = "<|im_start|>assistant\\n"   # Qwen chat-template assistant marker\n'
+      'collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)\n'
+      '# sanity: confirm the marker tokenizes and is found in a sample\n'
+      'assert response_template in ds["train"][0]["text"], "assistant marker not found — check template"'),
+
+ (MD, "## 7. Train (dev = in-training validation; eval stays untouched)"),
+ (CO, 'from trl import SFTTrainer, SFTConfig\n\n'
+      'args = SFTConfig(\n'
+      '    output_dir=output_dir,\n'
+      '    num_train_epochs=num_train_epochs,\n'
+      '    per_device_train_batch_size=per_device_train_batch_size,\n'
+      '    per_device_eval_batch_size=per_device_eval_batch_size,\n'
+      '    gradient_accumulation_steps=gradient_accumulation_steps,\n'
+      '    learning_rate=learning_rate,\n'
+      '    lr_scheduler_type=lr_scheduler_type,\n'
+      '    warmup_ratio=warmup_ratio,\n'
+      '    weight_decay=weight_decay,\n'
+      '    logging_steps=logging_steps,\n'
+      '    bf16=True,\n'
+      '    gradient_checkpointing=True,\n'
+      '    gradient_checkpointing_kwargs={"use_reentrant": False},\n'
+      '    max_seq_length=max_seq_length,\n'
+      '    dataset_text_field="text",\n'
+      '    packing=False,   # required for response-only masking\n'
+      '    eval_strategy="epoch",\n'
+      '    save_strategy="epoch",\n'
+      '    load_best_model_at_end=True,\n'
+      '    metric_for_best_model="eval_loss",\n'
+      '    report_to="tensorboard",\n'
+      ')\n\n'
+      'trainer = SFTTrainer(\n'
+      '    model=model,\n'
+      '    args=args,\n'
+      '    train_dataset=ds["train"],\n'
+      '    eval_dataset=ds["dev"],\n'
+      '    peft_config=peft_config,\n'
+      '    data_collator=collator,\n'
+      ')\n'
+      'trainer.train()'),
+
+ (MD, "## 8. Save LoRA adapter + merged fp16 model"),
+ (CO, 'trainer.model.save_pretrained(adapter_dir)\n'
+      'tokenizer.save_pretrained(adapter_dir)\n'
+      'print("saved LoRA adapter to", adapter_dir)\n\n'
+      '# merge to a standalone fp16 model for inference / GGUF export\n'
+      'from peft import PeftModel\n'
+      'import torch, gc\n'
+      'del model, trainer; gc.collect(); torch.cuda.empty_cache()\n'
+      'base = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16,\n'
+      '                                            device_map={"": 0}, trust_remote_code=True)\n'
+      'merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()\n'
+      'merged.save_pretrained(adapter_dir + "-merged")\n'
+      'tokenizer.save_pretrained(adapter_dir + "-merged")\n'
+      'print("saved merged model to", adapter_dir + "-merged")'),
+
+ (MD, "## 9. Persist to Drive"),
+ (CO, 'from google.colab import drive\n'
+      'drive.mount("/content/drive")\n'
+      '!mkdir -p /content/drive/MyDrive/slm_ckpt\n'
+      '# {adapter_dir} is interpolated by IPython from the Python namespace at runtime\n'
+      '!cp -r {adapter_dir} {adapter_dir}-merged /content/drive/MyDrive/slm_ckpt/ 2>/dev/null; echo saved'),
+
+ (MD, "## Next\n"
+      "Run **`colab_eval.ipynb`** to serve this merged model and score it on the held-out "
+      "`eval.jsonl` through our sandbox+scorer — the tuned side of the base-vs-tuned table in "
+      "`GAP_ANALYSIS.md` (unaugmented Opus is ~5–7% valid; target is high pass@1)."),
+]
+
+
+def build():
+    nb_cells = []
+    for kind, src in cells:
+        cell = {"cell_type": kind, "metadata": {}, "source": src}
+        if kind == CO:
+            cell["execution_count"] = None
+            cell["outputs"] = []
+        nb_cells.append(cell)
+    nb = {
+        "cells": nb_cells,
+        "metadata": {
+            "kernelspec": {"name": "python3", "display_name": "Python 3"},
+            "language_info": {"name": "python"},
+            "accelerator": "GPU",
+            "colab": {"provenance": []},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "colab_train_qlora.ipynb")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(nb, fh, indent=1)
+    return out
+
+
+if __name__ == "__main__":
+    path = build()
+    with open(path, encoding="utf-8") as fh:
+        nb = json.load(fh)
+    print(f"wrote {path}")
+    print(f"cells: {len(nb['cells'])} "
+          f"({sum(c['cell_type']=='code' for c in nb['cells'])} code, "
+          f"{sum(c['cell_type']=='markdown' for c in nb['cells'])} md)")

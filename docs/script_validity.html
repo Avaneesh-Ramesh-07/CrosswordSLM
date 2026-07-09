@@ -1,0 +1,276 @@
+<title>Script validity over passes</title>
+<style>
+  :root {
+    --bg: #f2f4f7;
+    --panel: #ffffff;
+    --ink: #1a1e26;
+    --muted: #5c6675;
+    --hair: #dfe3ea;
+    --grid: #c9cfd9;
+    --line: #3f6fb0;
+    --valid: #2f9e5b;
+    --invalid: #cf3f52;
+    --shadow: 0 1px 2px rgba(20,25,35,.06), 0 8px 30px rgba(20,25,35,.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --panel: #161b23;
+      --ink: #e7ebf2;
+      --muted: #9aa4b4;
+      --hair: #252c37;
+      --grid: #2c3542;
+      --line: #6ea1e0;
+      --valid: #43c46f;
+      --invalid: #e5677a;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f2f4f7; --panel: #ffffff; --ink: #1a1e26; --muted: #5c6675;
+    --hair: #dfe3ea; --grid: #c9cfd9; --line: #3f6fb0; --valid: #2f9e5b;
+    --invalid: #cf3f52; --shadow: 0 1px 2px rgba(20,25,35,.06), 0 8px 30px rgba(20,25,35,.07);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b23; --ink: #e7ebf2; --muted: #9aa4b4;
+    --hair: #252c37; --grid: #2c3542; --line: #6ea1e0; --valid: #43c46f;
+    --invalid: #e5677a; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono {
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 44px 24px 64px; }
+
+  .eyebrow {
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.1rem); line-height: 1.15;
+    margin: 0 0 12px; text-wrap: balance; letter-spacing: -.01em;
+  }
+  .lede { color: var(--muted); font-size: 1rem; max-width: 62ch; margin: 0 0 8px; }
+  .lede b.g { color: var(--valid); }
+  .lede b.r { color: var(--invalid); }
+
+  .headline-stat {
+    display: inline-flex; align-items: baseline; gap: 10px; margin: 18px 0 4px;
+  }
+  .headline-stat .num {
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 2rem; font-weight: 600; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .headline-stat .cap { color: var(--muted); font-size: .95rem; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 22px 20px 12px; margin: 22px 0 30px;
+  }
+  .chart-scroll { overflow-x: auto; }
+  svg { display: block; width: 100%; min-width: 560px; height: auto; }
+
+  .cumline { fill: none; stroke: var(--line); stroke-width: 2.5; stroke-linejoin: round; }
+  .refline { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 3 4; }
+  .gridline { stroke: var(--hair); stroke-width: 1; }
+  .axis-lbl { fill: var(--muted); font-size: 12px; }
+  .axis-lbl.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .marker.valid { fill: var(--valid); }
+  .marker.invalid { fill: var(--invalid); }
+  .marker-ring { fill: var(--panel); }
+  .xlabel { fill: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .xlabel.bad { fill: var(--invalid); }
+  .note { fill: var(--invalid); font-size: 10.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .note-lead { stroke: var(--invalid); stroke-width: 1; opacity: .55; }
+
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; padding: 6px 4px 2px; color: var(--muted); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .dot.g { background: var(--valid); }
+  .dot.r { background: var(--invalid); }
+  .swatch-line { width: 22px; height: 3px; border-radius: 2px; background: var(--line); display: inline-block; }
+
+  h2 {
+    font-size: 1.05rem; margin: 34px 0 4px; letter-spacing: -.01em;
+  }
+  .sub { color: var(--muted); font-size: .92rem; margin: 0 0 16px; }
+
+  .cases { display: grid; gap: 12px; }
+  .case {
+    background: var(--panel); border: 1px solid var(--hair);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .case .pass {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
+    color: var(--invalid); font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .case .pass::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--invalid); flex: none;
+  }
+  .case .row { display: grid; grid-template-columns: 68px 1fr; gap: 6px 12px; font-size: .93rem; }
+  .case .k { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; padding-top: 2px; }
+  .case .v { color: var(--ink); }
+  .case .v code {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .86em;
+    background: color-mix(in srgb, var(--muted) 14%, transparent);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  .footer { color: var(--muted); font-size: .82rem; margin-top: 28px; border-top: 1px solid var(--hair); padding-top: 14px; }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Self-audit · session log</p>
+  <h1>Which of my scripts held up on first run</h1>
+  <p class="lede">
+    Each pass is one script I wrote and executed this session.
+    <b class="g">Green</b> = it did its job the first time.
+    <b class="r">Red</b> = I found it wrong and rewrote it — the write→run→patch churn worth cutting.
+    Treating each red as a negative example (SOAR-style) to reason from beats reflexively re-patching the same file.
+  </p>
+  <div class="headline-stat">
+    <span class="num" id="stat-num">–</span>
+    <span class="cap">valid on first run</span>
+  </div>
+
+  <div class="panel">
+    <div class="chart-scroll">
+      <svg id="chart" viewBox="0 0 960 470" role="img"
+           aria-label="Line chart of cumulative first-run script validity across 12 passes."></svg>
+    </div>
+    <div class="legend">
+      <span><i class="swatch-line"></i> cumulative first-run validity %</span>
+      <span><i class="dot g"></i> valid on first run</span>
+      <span><i class="dot r"></i> validated wrong → rewrote</span>
+    </div>
+  </div>
+
+  <h2>The three negative examples</h2>
+  <p class="sub">What broke, why, and the rule each one leaves behind.</p>
+  <div class="cases" id="cases"></div>
+
+  <p class="footer mono">
+    Scope: the 11×11 "bigger grids" work — diagnostics, template-library build, and the template_ac3 generator.
+    Passes counted at first execution of each script/version, in order.
+  </p>
+</div>
+
+<script>
+  const PASSES = [
+    { label: "show_output",      valid: 1 },
+    { label: "diag_big",         valid: 1 },
+    { label: "diag_template",    valid: 1 },
+    { label: "diag_templib",     valid: 1 },
+    { label: "build_templates",  valid: 1 },
+    { label: "build_more",       valid: 1 },
+    { label: "template_ac3 v1",  valid: 0, note: "overran 12s → 24s" },
+    { label: "test_template v1", valid: 0, note: "dict → valid=0" },
+    { label: "test_template v2", valid: 1 },
+    { label: "template_ac3 v2",  valid: 0, note: "10/12 valid" },
+    { label: "template_ac3 v3",  valid: 1 },
+    { label: "regen_templates",  valid: 1 },
+  ];
+
+  const CASES = [
+    {
+      pass: "template_ac3 v1",
+      broke: "The generator ignored its 12s budget — one topic ran 24s.",
+      why: "The domain copy in the backtracking loop ran before AC-3's deadline check, so after time expired it kept copying domains for thousands of candidates.",
+      rule: "Check the wall-clock deadline at the top of every candidate loop, before any expensive work — not just inside the propagation routine.",
+    },
+    {
+      pass: "test_template v1",
+      broke: "The scorer reported valid=0 for grids that were obviously valid.",
+      why: "I passed the two-tier {theme, fill} dict straight to score(); iterating a dict yields its keys, so the allowed set became {THEME, FILL}.",
+      rule: "Flatten the two-tier word source to a word set before any validity check — mirror how verify.py already does it.",
+    },
+    {
+      pass: "template_ac3 v2",
+      broke: "The two-pass rewrite still failed 2 of 12 topics.",
+      why: "Theme-first fill consumed the budget across templates before a plain fallback could land, with no restart to escape an unlucky deep search.",
+      rule: "For fillable-but-occasionally-deep search, short attempts + random restarts beat one long attempt.",
+    },
+  ];
+
+  // cumulative first-run validity rate
+  const rate = PASSES.map((_, i) => {
+    const upto = PASSES.slice(0, i + 1);
+    return 100 * upto.filter(p => p.valid).length / upto.length;
+  });
+  const nValid = PASSES.filter(p => p.valid).length;
+  document.getElementById("stat-num").textContent =
+    nValid + " / " + PASSES.length + "  ·  " + Math.round(100 * nValid / PASSES.length) + "%";
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("chart");
+  const W = 960, H = 470;
+  const m = { l: 52, r: 22, t: 26, b: 118 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const yMin = 60, yMax = 102;
+  const x = i => m.l + (PASSES.length === 1 ? 0 : pw * i / (PASSES.length - 1));
+  const y = v => m.t + ph * (1 - (v - yMin) / (yMax - yMin));
+
+  const el = (tag, attrs, text) => {
+    const n = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    svg.appendChild(n);
+    return n;
+  };
+
+  // y gridlines + labels
+  [70, 80, 90, 100].forEach(v => {
+    el("line", { class: "gridline", x1: m.l, y1: y(v), x2: W - m.r, y2: y(v) });
+    el("text", { class: "axis-lbl mono", x: m.l - 10, y: y(v) + 4, "text-anchor": "end" }, v + "%");
+  });
+  // 75% reference
+  el("line", { class: "refline", x1: m.l, y1: y(75), x2: W - m.r, y2: y(75) });
+
+  // cumulative line
+  const pts = rate.map((v, i) => x(i) + "," + y(v)).join(" ");
+  el("polyline", { class: "cumline", points: pts });
+
+  // markers + x labels + failure annotations
+  PASSES.forEach((p, i) => {
+    const cx = x(i), cy = y(rate[i]);
+    el("circle", { class: "marker-ring", cx, cy, r: 7.5 });
+    el("circle", { class: "marker " + (p.valid ? "valid" : "invalid"), cx, cy, r: 5 });
+
+    // rotated x label
+    const t = el("text", { class: "xlabel" + (p.valid ? "" : " bad"),
+      x: cx, y: H - m.b + 16, "text-anchor": "end",
+      transform: "rotate(-42 " + cx + " " + (H - m.b + 16) + ")" }, p.label);
+    void t;
+
+    if (!p.valid && p.note) {
+      const ny = cy - 20;
+      el("line", { class: "note-lead", x1: cx, y1: cy - 9, x2: cx, y2: ny + 2 });
+      el("text", { class: "note", x: cx, y: ny - 2, "text-anchor": "middle" }, p.note);
+    }
+  });
+
+  // build case cards
+  const wrap = document.getElementById("cases");
+  CASES.forEach(c => {
+    const card = document.createElement("div");
+    card.className = "case";
+    card.innerHTML =
+      '<div class="pass">' + c.pass + '</div>' +
+      '<div class="row"><div class="k">Broke</div><div class="v">' + c.broke + '</div>' +
+      '<div class="k">Why</div><div class="v">' + c.why + '</div>' +
+      '<div class="k">Rule</div><div class="v">' + c.rule + '</div></div>';
+    wrap.appendChild(card);
+  });
+</script>

@@ -41,6 +41,11 @@ WEIGHTS = {
     "runtime": 0.05,
     "connected": 0.05,
 }
+# Opt-in fitness shaping (quality_penalty=True): make "what makes a good filler"
+# steer the search -- penalize filler words and any invalid connections. Off by
+# default so SFT gating and the scorer unit tests are unaffected.
+FILLER_PENALTY = 0.15
+INVALID_PENALTY = 0.25
 
 
 @dataclass
@@ -133,7 +138,8 @@ def _symmetric(white: set, size: int) -> bool:
 
 
 def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
-          scores=None, unscored_default=50, relaxed=False, vocab_set=None) -> dict:
+          scores=None, unscored_default=50, relaxed=False, vocab_set=None,
+          quality_penalty=False) -> dict:
     """Score one generated crossword against `spec`. Returns a metrics dict.
 
     `word_source`     : iterable of allowed words (topic words + fill list).
@@ -170,6 +176,9 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
         "symmetry_ok": True,
         "accidental": 0,
         "crossings": 0,
+        "n_across": 0,
+        "n_down": 0,
+        "n_entries": 0,
         "combined_score": 0.0,
         "combined_gated": 0.0,
         "reasons": reasons,
@@ -294,6 +303,9 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
     across_cells = {(r, c + i) for (r, c, w, l) in hruns if l >= minlen for i in range(l)}
     down_cells = {(r + i, c) for (r, c, w, l) in vruns if l >= minlen for i in range(l)}
     R["crossings"] = len(across_cells & down_cells)
+    R["n_across"] = len(across)
+    R["n_down"] = len(down)
+    R["n_entries"] = len(across) + len(down)
 
     # relaxed only: every white cell must still belong to at least one real entry
     # (>= min_word_len) -- allows unchecked cells but forbids floating fragments.
@@ -399,6 +411,9 @@ def score(layout, spec: Spec, word_source, dictionary=None, runtime_s=None,
         + WEIGHTS["runtime"] * R["runtime_ok"]
         + WEIGHTS["connected"] * R["connected"]
     )
+    if quality_penalty:
+        raw -= FILLER_PENALTY * (R["filler_fraction"] or 0.0)
+        raw -= INVALID_PENALTY * (R["invalid_crossing_frac"] + R["invalid_entry_frac"])
     raw = max(0.0, min(1.0, raw - penalty))
     R["combined_score"] = round(raw, 4)
     R["combined_gated"] = round(R["valid"] * raw, 4)

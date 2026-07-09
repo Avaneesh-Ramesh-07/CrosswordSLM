@@ -1,0 +1,86 @@
+{
+  "gen": 2,
+  "programs": [
+    {
+      "name": "mrv_fc_theme",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "MRV",
+        "forward_check",
+        "pattern_index",
+        "greedy_restart",
+        "theme_first"
+      ],
+      "parents": [
+        "reference_v1",
+        "vocab_first"
+      ],
+      "notes": "gen1 reliability winner (MRV+FC+pattern-index) + theme-first value ordering"
+    },
+    {
+      "name": "ac3_mrv_theme",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "MRV",
+        "theme_first"
+      ],
+      "parents": [
+        "csp_ac3",
+        "ac3_theme"
+      ],
+      "notes": "AC-3/MAC with MRV selection (fast) + theme-first value ordering"
+    },
+    {
+      "name": "reference_v1",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "MRV",
+        "forward_check",
+        "pattern_index",
+        "greedy_restart"
+      ],
+      "parents": [],
+      "notes": "gen1 baseline (reliability winner)"
+    },
+    {
+      "name": "ac3_theme",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "theme_first",
+        "greedy_restart"
+      ],
+      "parents": [],
+      "notes": "gen1 baseline (longest-slot-first theme)"
+    },
+    {
+      "name": "csp_ac3",
+      "sizes": [
+        7,
+        9
+      ],
+      "heuristics": [
+        "AC3",
+        "MAC",
+        "MRV"
+      ],
+      "parents": [],
+      "notes": "seed baseline"
+    }
+  ]
+}

@@ -99,6 +99,11 @@ def build_word_source(topic_words, fill_dict: dict) -> list:
 
 _COMMON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "wordlists", "common_english.txt")
 _SAT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "wordlists", "sat_words.txt")
+_DICT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "wordlists", "words_alpha.txt")
+
+# Proper nouns / acronyms that slip through the dictionary word list (they happen
+# to appear in words_alpha) but are not vocabulary. Extend as leaks are spotted.
+_NOT_VOCAB = {"CIA", "HORATIO", "NIELSEN", "FBI", "NASA", "NATO", "ROC"}
 
 
 def _load_wordset(path):
@@ -115,7 +120,8 @@ def _load_wordset(path):
 
 
 def build_education_source(min_score=55, min_len=3, max_len=15, sat_path=_SAT_PATH,
-                           include_common_fill=False, common_path=_COMMON_PATH):
+                           include_common_fill=False, common_path=_COMMON_PATH,
+                           big_fill_per_len=None):
     """Vocabulary crossword source (Insight #3).
 
     By DEFAULT the palette is the PURE INTERSECTION of high-scoring crossword
@@ -127,6 +133,12 @@ def build_education_source(min_score=55, min_len=3, max_len=15, sat_path=_SAT_PA
     structural CONNECTORS (SAT lists have almost no 3-4 letter words, so pure-
     intersection grids are very hard to fill). `targets` always stays the
     intersection vocabulary, and `coverage` rewards placing it.
+
+    Set big_fill_per_len=N for LARGE grids (11x11+): fill becomes the top-N
+    highest-scored crossword words per length from the full scored list. This is
+    the only tier with enough long words (9-11 letters) to fill a big grid; the
+    common-English list (google-10000) is almost all short words. `targets` still
+    stays the SAT vocabulary. Takes precedence over include_common_fill.
     """
     scored = load_scored_dict(min_score=min_score, min_len=min_len, max_len=max_len)
     sat = _load_wordset(sat_path)
@@ -138,7 +150,15 @@ def build_education_source(min_score=55, min_len=3, max_len=15, sat_path=_SAT_PA
 
     allowed = dict(vocab)
     fill = {}
-    if include_common_fill:
+    used_big = False
+    if big_fill_per_len:
+        used_big = True
+        for length, lst in index_by_length(scored).items():
+            for word, sc in lst[:big_fill_per_len]:
+                if word not in vocab:
+                    fill[word] = sc
+        allowed.update(fill)
+    elif include_common_fill:
         common = _load_wordset(common_path)
         if common:
             fill = {w: s for w, s in scored.items() if w in common and w not in vocab}
@@ -148,12 +168,55 @@ def build_education_source(min_score=55, min_len=3, max_len=15, sat_path=_SAT_PA
         "allowed": sorted(allowed),
         "scores": allowed,
         "targets": sorted(vocab),        # the SAT n crossword vocabulary to teach
-        "fill_words": sorted(fill),      # empty unless include_common_fill=True
+        "fill_words": sorted(fill),      # empty unless a fill tier is enabled
         "n_allowed": len(allowed),
         "n_vocab": len(vocab),
         "n_fill": len(fill),
         "used_sat": sat is not None,
-        "used_common": bool(fill),
+        "used_common": bool(fill) and not used_big,
+        "used_big_fill": used_big,
+    }
+
+
+def build_clean_education_source(freq_n=50000, min_score=55, min_len=3, max_len=11,
+                                 sat_path=_SAT_PATH, dict_path=_DICT_PATH):
+    """Broadened CLEAN educational palette (the ">70% vocab n crossword-worthy" path).
+
+    Every word in the palette is simultaneously:
+      * a real dictionary word (words_alpha) -> no acronyms, ~no proper nouns
+      * gettable: in the wordfreq top-`freq_n` English words, OR a SAT vocab word
+      * crossword-worthy: Collaborative-List score >= min_score
+
+    A grid filled ONLY from this palette is therefore ~100% "vocabulary that is also
+    crossword-worthy" by construction (the crosswordese/abbreviation junk that a
+    dense grid otherwise forces into short slots is gone). The strict SAT vocabulary
+    stays as `targets` -- a tracked coverage sub-metric, not the acceptance gate.
+
+    Unlike the pure/common education sources, this one is large enough at every
+    length (incl. 9-11) to actually fill a dense 11x11. Requires the `wordfreq`
+    package and the cached dictionary at dict_path (see scratchpad/fetch_dict.py).
+    """
+    import wordfreq
+
+    scored = load_scored_dict(min_score=min_score, min_len=min_len, max_len=max_len)
+    dict_words = _load_wordset(dict_path) or set()
+    freq = {w.upper() for w in wordfreq.top_n_list("en", freq_n) if w.isalpha()}
+    sat = _load_wordset(sat_path) or set()
+
+    clean = {
+        w: s for w, s in scored.items()
+        if w in dict_words and w not in _NOT_VOCAB and (w in freq or w in sat)
+    }
+    vocab = {w: s for w, s in clean.items() if w in sat}
+    return {
+        "allowed": sorted(clean),
+        "scores": clean,
+        "clean_set": set(clean),          # THE vocab n crossword set (>70% criterion)
+        "targets": sorted(vocab),         # strict SAT vocabulary (coverage sub-metric)
+        "fill_words": sorted(set(clean) - set(vocab)),
+        "n_allowed": len(clean),
+        "n_vocab": len(vocab),
+        "used_dict": bool(dict_words),
     }
 
 
