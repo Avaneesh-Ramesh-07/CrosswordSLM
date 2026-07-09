@@ -94,7 +94,12 @@ cells = [
       '    assert os.path.exists(f"{DATA_DIR}/{_f}"), f"missing {_f} in {DATA_DIR}"\n'
       'print("data dir:", DATA_DIR, os.listdir(DATA_DIR))'),
 
- (MD, "## 3. Config"),
+ (MD, "## 3. Config\n"
+      "Hyperparameters. **Batch size + gradient checkpointing are auto-tuned to the GPU** "
+      "detected in cell 1b: the *effective* batch stays ~16 (the right convergence target for "
+      "~2.1k rows) while the *per-device* batch scales with VRAM, and checkpointing is turned "
+      "off when there's memory to spare (~28% faster). Wall-clock is set by rows×epochs×seq, "
+      "not by batch size — bigger per-device batch just improves GPU utilization."),
  (CO, '# Qwen3-4B instruct. Confirm the exact HF id (alts: "Qwen/Qwen3-4B",\n'
       '# "Qwen/Qwen3-4B-Instruct"). Start from Instruct for fast SFT.\n'
       'model_name  = "Qwen/Qwen3-4B-Instruct-2507"  # base model to fine-tune FROM\n'
@@ -106,10 +111,30 @@ cells = [
       'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
       '# programs are long (a full generator); give the sequence room\n'
       'max_seq_length = 4096\n\n'
-      'num_train_epochs = 5\n'
-      'per_device_train_batch_size = 1\n'
-      'per_device_eval_batch_size  = 1\n'
-      'gradient_accumulation_steps = 16   # effective batch ~16\n'
+      'num_train_epochs = 3\n\n'
+      '# ---- throughput config: auto-tuned to the GPU detected in cell 1b ----\n'
+      '# Wall-clock is set by rows x epochs x seq-len, NOT batch size. We hold the\n'
+      '# EFFECTIVE batch at ~16 (right convergence target for ~2.1k rows) and only scale\n'
+      '# the PER-DEVICE batch with VRAM (fewer micro-steps + better GPU utilization).\n'
+      '# Grad-checkpointing is turned OFF only when there is real VRAM headroom (A100):\n'
+      '# at seq-len 4096 a 4B model OOMs without it on a 24GB card.\n'
+      '_vram = globals().get("total_gb", 16.0)   # from cell 1b; fallback = conservative 16GB\n'
+      'if _vram >= 38:        # A100 40GB\n'
+      '    # batch-2 + NO checkpointing fits ~25GB at seq 4096 and skips forward recompute\n'
+      '    # (~28% faster). batch-8 without checkpointing would OOM even a 40GB card here.\n'
+      '    per_device_train_batch_size, gradient_accumulation_steps = 2, 8\n'
+      '    gradient_checkpointing = False\n'
+      'elif _vram >= 22:      # L4 24GB\n'
+      '    per_device_train_batch_size, gradient_accumulation_steps = 2, 8\n'
+      '    gradient_checkpointing = True\n'
+      'else:                  # T4 16GB (or unknown) -- memory-bound, keep it minimal\n'
+      '    per_device_train_batch_size, gradient_accumulation_steps = 1, 16\n'
+      '    gradient_checkpointing = True\n'
+      'per_device_eval_batch_size = per_device_train_batch_size\n'
+      'eff = per_device_train_batch_size * gradient_accumulation_steps\n'
+      'print(f"[auto] VRAM~{_vram:.0f}GB -> per_device_batch={per_device_train_batch_size}, "\n'
+      '      f"accum={gradient_accumulation_steps} (effective ~{eff}), "\n'
+      '      f"grad_checkpointing={gradient_checkpointing}")\n\n'
       'learning_rate = 2e-4\n'
       'lr_scheduler_type = "cosine"\n'
       'warmup_ratio = 0.03\n'
@@ -141,7 +166,7 @@ cells = [
       ')\n'
       'model.config.use_cache = False\n'
       'model = prepare_model_for_kbit_training(\n'
-      '    model, use_gradient_checkpointing=True,\n'
+      '    model, use_gradient_checkpointing=gradient_checkpointing,   # auto-set in cell 3\n'
       '    # reentrant=True: Qwen3 saves a different tensor count on recompute, which trips\n'
       '    # the non-reentrant checkpointer ("A different number of tensors was saved...").\n'
       '    gradient_checkpointing_kwargs={"use_reentrant": True},\n'
@@ -201,9 +226,11 @@ cells = [
       '    warmup_ratio=warmup_ratio,\n'
       '    weight_decay=weight_decay,\n'
       '    logging_steps=logging_steps,\n'
+      '    optim="paged_adamw_8bit",   # QLoRA-standard 8-bit optimizer: less optimizer memory -> room for a bigger batch\n'
+      '    group_by_length=True,       # bucket similar-length rows so batches are not padded up to 4096 (matters once batch>1)\n'
       '    bf16=bf16_ok,\n'
       '    fp16=not bf16_ok,\n'
-      '    gradient_checkpointing=True,\n'
+      '    gradient_checkpointing=gradient_checkpointing,   # auto-set in cell 3\n'
       '    gradient_checkpointing_kwargs={"use_reentrant": True},   # must match cell 4 (fixes Qwen3 CheckpointError)\n'
       '    max_length=max_seq_length,   # canonical arg; max_seq_length is deprecated/ignored\n'
       '    dataset_text_field="text",\n'
@@ -248,9 +275,13 @@ cells = [
       '!cp -r {adapter_dir} {adapter_dir}-merged /content/drive/MyDrive/slm_ckpt/ 2>/dev/null; echo saved'),
 
  (MD, "## Next\n"
-      "Run **`colab_eval.ipynb`** to serve this merged model and score it on the held-out "
-      "`eval.jsonl` through our sandbox+scorer — the tuned side of the base-vs-tuned table in "
-      "`GAP_ANALYSIS.md` (unaugmented Opus is ~5–7% valid; target is high pass@1)."),
+      "Your trained artifacts are in Drive (`MyDrive/slm_ckpt/`): the LoRA adapter "
+      "(`qwen3-4b-crossword-qlora`) and the merged fp16 model (`…-merged`) for inference / "
+      "GGUF export.\n\n"
+      "Eval is run **separately** — the old `colab_eval.ipynb` is stale, don't use it. The "
+      "goal is the base-vs-tuned comparison in `GAP_ANALYSIS.md`: score the tuned model on the "
+      "pristine held-out `eval.jsonl` through the sandbox+scorer and compare against "
+      "unaugmented Opus (~5–7% valid) — target is high pass@1."),
 ]
 
 
