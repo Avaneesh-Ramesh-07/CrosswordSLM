@@ -56,9 +56,9 @@ A 3-turn chat example plus non-trained curation metadata.
 ```json
 {
   "messages": [
-    {"role": "system",    "content": "<fixed task contract: rules + output schema + technique menu>"},
+    {"role": "system",    "content": "You are an expert Python programmer."},
     {"role": "user",      "content": "Create a 9x9 fixed-grid (non-free-form) crossword about vocabulary."},
-    {"role": "assistant", "content": "```python\n<verified generate_crossword program>\n```"}
+    {"role": "assistant", "content": "```python\n# === TASK CONTRACT (this program is written to satisfy the following) ===\n# ...output schema + hard rules + technique menu, as comments...\n<verified generate_crossword program>\n```"}
   ],
   "meta": {
     "spec_id": "s00010",
@@ -77,10 +77,15 @@ A 3-turn chat example plus non-trained curation metadata.
 
 - **Trained turn:** only the `assistant` message (response-only loss); `system` + `user`
   are masked.
-- **`system`** is a fixed contract (identical across all rows): output schema + hard
-  validity rules + a technique menu. **`user`** is the minimal, size-routed request — the
-  topic is always "vocabulary"; only the size (and phrasing) varies, so the model must
-  infer which construction/fill technique to apply from the size.
+- **`system`** is now a **minimal, generic prompt** (`"You are an expert Python
+  programmer."`) — **no task hints**. **`user`** is the minimal, size-routed request:
+  topic is always "vocabulary"; only size (+ phrasing) varies.
+- **The task contract lives as a COMMENT HEADER at the top of the `assistant` program**,
+  not in the system prompt (`build_dataset.assistant_content`). Since response-only loss
+  trains on the assistant turn, the contract (output schema + hard rules + technique menu)
+  is learned into the **weights** — so at inference the **bare user message suffices**, no
+  system-prompt hints needed. This matches the clean-room eval/deployment condition and
+  targets the "the model must know it itself" gap.
 - **`meta`** is curation info, not fed to the model. `fixed_template` rows additionally
   carry `engine`, `selection`, and `subset` keys recording how that program was emitted.
 

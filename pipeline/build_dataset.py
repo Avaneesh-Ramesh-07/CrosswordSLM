@@ -17,27 +17,59 @@ import os
 # ALL the task knowledge lives in the SYSTEM turn (fixed), so the USER turn can be a
 # short natural request ("create a 7x7 crossword about vocabulary") and the model
 # decides which algorithm to apply. No per-spec hints -> the model chooses.
-SYSTEM = (
-    "You are an expert Python programmer specializing in crossword generation.\n"
-    "The user will ask, in plain language, for a crossword of a given size on a given "
-    "topic. Output EXACTLY ONE self-contained Python program (stdlib only) defining:\n"
+# The full task contract. It is NO LONGER injected in the system prompt -- the user
+# just types a bare request. Instead it is emitted as a COMMENT HEADER inside every
+# generated program (see assistant_content), so the task knowledge is learned into the
+# WEIGHTS (part of the training target) rather than supplied at inference. This makes
+# the bare user message sufficient and targets the "model must know it itself" gap.
+_CONTRACT = (
+    "Task: from a plain-language request for a crossword of a given size, produce EXACTLY\n"
+    "ONE self-contained Python program (standard library only) defining:\n"
     "    generate_crossword(topic: str, word_source, size: int) -> dict\n"
     "It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:\n"
     '    {"rows": int, "cols": int,\n'
     '     "cells": [{"r","c","letter","number"(optional)}],\n'
     '     "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}\n'
-    "The crossword MUST satisfy: exactly size x size; black squares in 180-degree "
-    "rotational symmetry; every white run (across and down) >= 3 letters; every white "
-    "cell checked in BOTH directions; all white cells connected; every entry a real "
-    "word taken from word_source; high white-square density; completes within a few "
-    "seconds.\n"
-    "word_source is provided at runtime (a list, or a {\"theme\",\"fill\"} dict of "
-    "prioritized vocabulary + fill words); NEVER invent or hardcode words. YOU choose "
-    "the construction and fill strategy (e.g. CSP backtracking with MRV + forward "
-    "checking, AC-3 / maintained arc consistency, a (length,position,letter) pattern "
-    "index, beam search, theme-first ordering to maximize vocabulary). Prefer packing "
-    "vocabulary words where the crossings allow. Output only the Python code."
+    "Hard rules the crossword MUST satisfy: exactly size x size; black squares in\n"
+    "180-degree rotational symmetry; every white run (across and down) >= 3 letters;\n"
+    "every white cell checked in BOTH directions; all white cells connected; every\n"
+    "entry a real word taken from word_source; high white-square density; completes\n"
+    "within a few seconds.\n"
+    "word_source is provided at runtime (a list, or a {\"theme\",\"fill\"} dict of\n"
+    "prioritized vocabulary + fill words); NEVER invent or hardcode words. Choose the\n"
+    "construction and fill strategy (e.g. CSP backtracking with MRV + forward checking,\n"
+    "AC-3 / maintained arc consistency, a (length,position,letter) pattern index, beam\n"
+    "search, theme-first ordering to maximize vocabulary). Prefer packing vocabulary\n"
+    "words where the crossings allow."
 )
+
+# Minimal system prompt: the model must succeed from the bare user request alone.
+SYSTEM = "You are an expert Python programmer."
+
+
+def _contract_comment() -> str:
+    out = ["# === TASK CONTRACT (this program is written to satisfy the following) ==="]
+    for ln in _CONTRACT.rstrip("\n").split("\n"):
+        out.append("# " + ln if ln.strip() else "#")
+    return "\n".join(out)
+
+
+CONTRACT_COMMENT = _contract_comment()
+
+
+def assistant_content(code: str) -> str:
+    """The assistant turn = the contract as a COMMENT HEADER, then the program. Putting
+    the contract in the target (not the prompt) forces the knowledge into the weights,
+    so at inference the bare user request is enough (no system-prompt hints)."""
+    body = code.strip()
+    # normalize the function signature to EXACTLY match the contract
+    body = body.replace(
+        "def generate_crossword(topic, word_source, size):",
+        "def generate_crossword(topic: str, word_source, size: int) -> dict:",
+    )
+    if body.startswith(CONTRACT_COMMENT):        # idempotent: don't double-prepend
+        return f"```python\n{body}\n```"
+    return f"```python\n{CONTRACT_COMMENT}\n\n{body}\n```"
 
 # Natural phrasings so the model generalizes over wording. The topic is ALWAYS
 # "vocabulary" -- this is a vocabulary crossword generator, and the crossword content
@@ -63,12 +95,11 @@ def render_user_prompt(effective_spec: dict) -> str:
 
 def to_chat(row: dict) -> dict:
     """One solution row -> a chat example (messages + curation meta)."""
-    code = row["code"].strip()
     return {
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": render_user_prompt(row.get("effective_spec"))},
-            {"role": "assistant", "content": f"```python\n{code}\n```"},
+            {"role": "assistant", "content": assistant_content(row["code"])},
         ],
         "meta": {
             "spec_id": row.get("spec_id"),

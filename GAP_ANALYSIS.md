@@ -211,18 +211,6 @@ The others did worse, and did worse on a *far easier* version of the task:
   task is the pessimistic end. Both point the same direction: reliable generation has to
   come from the verified pipeline (and, ultimately, the distilled SLM), not the raw model.
 
-## Why the pipeline succeeds where one-shot Claude fails
-
-The reliability is a property of the **system**, not the model — and today that system
-is something the *user* has to stand up:
-
-| One-shot Claude | This pipeline (the "teacher") |
-|---|---|
-| single attempt | model **+ deterministic verifier + search + restarts** |
-| no ground truth | every candidate **run through the harness** and scored |
-| keeps whatever came out | **keep the good, label + keep the bad** (SOAR negatives) |
-| invents from scratch | **reuses canonical CSP algorithms** (CS50/qxw AC-3, pattern index) as scaffolding |
-
 Unreliable generation is *acceptable* when you verify and retain both outcomes:
 successes become training solutions; failures become labeled negatives (e.g. the 1002
 negatives in the bulk run). But standing up that verify-and-retain loop is exactly the
@@ -252,7 +240,7 @@ Two honest caveats:
   hand-building an eval harness, sourcing canonical algorithms, defining a vocabulary,
   writing a spec, and wrapping a search loop around the model, the tuned SLM **distills
   the output of that whole (Claude + verifier + search + scaffolding) system into
-  reliable one-shot generation** — the capability, without the apparatus.
+  reliable one-shot generation** - the capability, without the apparatus.
 - **The 4/66 hour and the 25% first-run failure are the eval baseline.** The
   base-vs-tuned test: give the base 4B (and one-shot Claude) the same held-out `eval`
   specs, run their emitted generators through the harness, and show they produce

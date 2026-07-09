@@ -35,7 +35,7 @@ SELECTIONS = {
     "fixed": "    pass  # try templates in catalog order",
 }
 
-_GEN = '''def generate_crossword(topic, word_source, size):
+_GEN = '''def generate_crossword(topic: str, word_source, size: int) -> dict:
     deadline = time.perf_counter() + {total}
     rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
     theme, fill = _split_source(word_source)

@@ -27,7 +27,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from harness.scorer import Spec, score
-from pipeline.build_dataset import SYSTEM, render_user_prompt
+from pipeline.build_dataset import SYSTEM, assistant_content, render_user_prompt
 from pipeline.emit_template_generator import emit
 from pipeline.word_source import build_clean_education_source
 
@@ -142,7 +142,7 @@ def build_records(kept, size, n_records):
             "messages": [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": render_user_prompt(eff)},
-                {"role": "assistant", "content": f"```python\n{var['code'].strip()}\n```"},
+                {"role": "assistant", "content": assistant_content(var["code"])},
             ],
             "meta": {"spec_id": sid, "kind": "fixed_template", "engine": var["engine"],
                      "selection": var["selection"], "subset": var["subset"],

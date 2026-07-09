@@ -24,20 +24,41 @@ cells = [
       "user prompt → verified assistant program), **response-only loss**, dev for validation, "
       "`eval` held out for the base-vs-tuned test (see `colab_eval.ipynb`)."),
 
- (MD, "## 1. Install (Qwen3 needs recent transformers; the Llama-2-era pins won't load it)"),
- (CO, "!pip install -q -U 'transformers>=4.51.0' 'trl>=0.12.0' 'peft>=0.13.0' "
-      "'bitsandbytes>=0.44.0' 'accelerate>=1.0.0' 'datasets>=3.0.0'"),
+ (MD, "## 1. Install (pinned, Qwen3-capable snapshot)\n"
+      "Versions are **pinned**, not `>=`, on purpose: the current `trl` (1.x) **removed** "
+      "`DataCollatorForCompletionOnlyLM` and **renamed** `SFTConfig(max_seq_length=)` -> "
+      "`max_length=`, which would break cells 6-7 with `-U`. `trl==0.19.1` is the last "
+      "release that supports **both** Qwen3 (needs `transformers>=4.51`) and the "
+      "response-only collator this notebook relies on."),
+ (CO, "!pip install -q -U 'transformers==4.53.*' 'trl==0.19.1' 'peft==0.16.*' "
+      "'bitsandbytes==0.46.*' 'accelerate==1.8.*' 'datasets==3.6.*'"),
 
  (MD, "## 2. Get the data\n"
-      "Either clone the repo and (re)build the merged, upsampled splits, **or** upload "
-      "`train.jsonl`/`dev.jsonl`/`eval.jsonl` yourself and set `DATA_DIR` to their folder."),
- (CO, f'REPO_URL = "{REPO_URL}"\n'
-      'import os\n'
-      'if not os.path.exists("slm"):\n'
-      '    !git clone -q $REPO_URL slm\n'
-      '# rebuild consolidated + upsampled splits (idempotent)\n'
-      '!cd slm && python pipeline/merge_dataset.py --upsample 11=3,15=3\n'
-      'DATA_DIR = "slm/data/sft"   # <-- or point at a folder you uploaded\n'
+      "**Do ONE of these** (the notebook will not invent data):\n"
+      "- **Clone your repo:** set `REPO_URL` below to your GitHub repo. The committed "
+      "`data/sft/{train,dev}.jsonl` splits are used as-is.\n"
+      "- **Upload:** put `train.jsonl`/`dev.jsonl` in a Colab folder and set `DATA_DIR` "
+      "to it (leave `REPO_URL` as the placeholder).\n\n"
+      "The raw per-run outputs (`runs/`) are gitignored, so a fresh clone has none; the "
+      "committed splits are already merged + upsampled, so we use them directly and only "
+      "rebuild when `runs/` is present -- we never clobber the committed data with empties."),
+ (CO, f'REPO_URL = "{REPO_URL}"   # <-- REQUIRED unless you set DATA_DIR to an upload\n'
+      'DATA_DIR = None            # <-- set to an uploaded folder to skip the clone\n'
+      'import os\n\n'
+      'if DATA_DIR is None:\n'
+      '    assert "<REPO>" not in REPO_URL, (\n'
+      '        "Set REPO_URL to your repo, OR set DATA_DIR to a folder containing "\n'
+      '        "train.jsonl/dev.jsonl that you uploaded via the Files panel."\n'
+      '    )\n'
+      '    if not os.path.exists("slm"):\n'
+      '        !git clone -q $REPO_URL slm\n'
+      '    DATA_DIR = "slm/data/sft"\n'
+      '    # committed splits are already merged+upsampled; only rebuild if the\n'
+      '    # (gitignored) raw per-run outputs are present -- never clobber with empties.\n'
+      '    if os.path.exists("slm/runs"):\n'
+      '        !cd slm && python pipeline/merge_dataset.py --upsample 11=3,15=3\n\n'
+      'for _f in ("train.jsonl", "dev.jsonl"):\n'
+      '    assert os.path.exists(f"{DATA_DIR}/{_f}"), f"missing {_f} in {DATA_DIR}"\n'
       'print("data dir:", DATA_DIR, os.listdir(DATA_DIR))'),
 
  (MD, "## 3. Config"),
@@ -66,10 +87,15 @@ cells = [
  (CO, 'import torch\n'
       'from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig\n'
       'from peft import LoraConfig, prepare_model_for_kbit_training\n\n'
+      '# T4 (Colab free tier) has no bf16 -> fall back to fp16 automatically.\n'
+      'bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()\n'
+      'compute_dtype = torch.bfloat16 if bf16_ok else torch.float16\n'
+      'gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (no GPU!)"\n'
+      'print(f"GPU: {gpu} | bf16 supported: {bf16_ok} -> compute dtype {compute_dtype}")\n\n'
       'bnb_config = BitsAndBytesConfig(\n'
       '    load_in_4bit=True,\n'
       '    bnb_4bit_quant_type="nf4",\n'
-      '    bnb_4bit_compute_dtype=torch.bfloat16,\n'
+      '    bnb_4bit_compute_dtype=compute_dtype,\n'
       '    bnb_4bit_use_double_quant=True,\n'
       ')\n'
       'tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)\n'
@@ -78,10 +104,13 @@ cells = [
       'tokenizer.padding_side = "right"\n\n'
       'model = AutoModelForCausalLM.from_pretrained(\n'
       '    model_name, quantization_config=bnb_config, device_map={"": 0},\n'
-      '    torch_dtype=torch.bfloat16, trust_remote_code=True,\n'
+      '    torch_dtype=compute_dtype, trust_remote_code=True,\n'
       ')\n'
       'model.config.use_cache = False\n'
-      'model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)\n\n'
+      'model = prepare_model_for_kbit_training(\n'
+      '    model, use_gradient_checkpointing=True,\n'
+      '    gradient_checkpointing_kwargs={"use_reentrant": False},\n'
+      ')\n\n'
       'peft_config = LoraConfig(\n'
       '    r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,\n'
       '    target_modules=target_modules, bias="none", task_type="CAUSAL_LM",\n'
@@ -127,10 +156,11 @@ cells = [
       '    warmup_ratio=warmup_ratio,\n'
       '    weight_decay=weight_decay,\n'
       '    logging_steps=logging_steps,\n'
-      '    bf16=True,\n'
+      '    bf16=bf16_ok,\n'
+      '    fp16=not bf16_ok,\n'
       '    gradient_checkpointing=True,\n'
       '    gradient_checkpointing_kwargs={"use_reentrant": False},\n'
-      '    max_seq_length=max_seq_length,\n'
+      '    max_length=max_seq_length,   # canonical arg; max_seq_length is deprecated/ignored\n'
       '    dataset_text_field="text",\n'
       '    packing=False,   # required for response-only masking\n'
       '    eval_strategy="epoch",\n'
@@ -144,6 +174,7 @@ cells = [
       '    args=args,\n'
       '    train_dataset=ds["train"],\n'
       '    eval_dataset=ds["dev"],\n'
+      '    processing_class=tokenizer,   # tokenize the `text` field with our configured tokenizer\n'
       '    peft_config=peft_config,\n'
       '    data_collator=collator,\n'
       ')\n'
