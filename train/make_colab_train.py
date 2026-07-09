@@ -115,7 +115,7 @@ cells = [
       'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
       '# programs are long (a full generator); give the sequence room\n'
       'max_seq_length = 4096\n\n'
-      'num_train_epochs = 3\n\n'
+      'num_train_epochs = 1\n\n'
       '# ---- throughput config: auto-tuned to the GPU detected in cell 1b ----\n'
       '# Wall-clock is set by rows x epochs x seq-len, NOT batch size. We hold the\n'
       '# EFFECTIVE batch at ~16 (right convergence target for ~2.1k rows) and scale the\n'
