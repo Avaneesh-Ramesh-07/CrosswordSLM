@@ -135,7 +135,7 @@ def build_records(kept, size, n_records):
     for i in range(n_records):
         sid = f"t{size}_{i:04d}"
         var = kept[i % len(kept)]
-        eff = {"spec_id": sid, "size": size, "require_symmetry": True, "min_word_len": 3,
+        eff = {"spec_id": sid, "size": size, "require_symmetry": False, "min_word_len": 3,
                "time_budget_s": tb, "density_target": 0.80, "topic": "vocabulary",
                "split": _split(sid), "approach": "fixed_template"}
         rows.append({
@@ -167,7 +167,7 @@ def main(argv=None):
     edu = build_clean_education_source(max_len=args.size)
     ws = {"theme": edu["targets"], "fill": edu["fill_words"]}
     words = edu["targets"] + edu["fill_words"]
-    spec = Spec(size=args.size, topic_words=tuple(edu["targets"]), require_symmetry=True,
+    spec = Spec(size=args.size, topic_words=tuple(edu["targets"]), require_symmetry=False,
                 min_word_len=3, time_budget_s=_BUDGET.get(args.size, args.size * 2))
 
     def log(m):

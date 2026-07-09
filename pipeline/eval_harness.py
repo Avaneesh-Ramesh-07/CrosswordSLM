@@ -235,7 +235,7 @@ def make_spec(eff, targets):
     return Spec(
         size=int(eff.get("size", 7)),
         topic_words=tuple(targets),
-        require_symmetry=eff.get("require_symmetry", True),
+        require_symmetry=eff.get("require_symmetry", False),
         min_word_len=eff.get("min_word_len", 3),
         time_budget_s=eff.get("time_budget_s", 5.0),
         density_target=eff.get("density_target", 0.72),

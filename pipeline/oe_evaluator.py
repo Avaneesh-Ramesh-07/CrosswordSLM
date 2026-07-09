@@ -136,7 +136,7 @@ def _load_problem(path):
     spec = Spec(
         size=p["size"],
         topic_words=tuple(topic_words),
-        require_symmetry=p.get("require_symmetry", True),
+        require_symmetry=p.get("require_symmetry", False),
         min_word_len=p.get("min_word_len", 3),
         time_budget_s=p.get("time_budget_s", 5.0),
         density_target=p.get("density_target", 0.72),

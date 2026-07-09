@@ -279,7 +279,7 @@ cells = [
       "Your trained artifacts are in Drive (`MyDrive/slm_ckpt/`): the LoRA adapter "
       "(`qwen3-4b-crossword-qlora`) and the merged fp16 model (`…-merged`) for inference / "
       "GGUF export.\n\n"
-      "Eval is run **separately** in `colab_eval_tuned.ipynb` (EVAL 3 on the tuned model). The "
+      "Eval is run **separately** in `colab_eval_tuned.ipynb` (EVAL 2 on the tuned model). The "
       "goal is the base-vs-tuned comparison in `GAP_ANALYSIS.md`: score the tuned model on the "
       "pristine held-out `eval.jsonl` through the sandbox+scorer and compare against "
       "unaugmented Opus (~5–7% valid) — target is high pass@1."),

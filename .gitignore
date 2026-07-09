@@ -15,3 +15,9 @@ runs/
 # ARE committed — the pipeline reads them on Colab.
 # But remove the word-list's nested git repo before committing (see setup notes):
 data/collaborative-word-list/.git/
+
+# models
+finetuned-models/
+
+# generated runs from eval
+slm_runs/

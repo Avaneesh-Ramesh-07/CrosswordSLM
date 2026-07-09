@@ -58,7 +58,8 @@ class Spec:
 
     size: int
     topic_words: tuple = ()
-    require_symmetry: bool = True
+    require_symmetry: bool = False  # 180-deg symmetry is an NYT convention, not a functional
+    #                                 validity requirement; density + interlock are what matter
     min_word_len: int = MIN_WORD_LEN
     time_budget_s: float = 5.0
     density_target: float = 0.72

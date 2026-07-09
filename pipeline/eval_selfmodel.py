@@ -87,7 +87,7 @@ def eval_program(code, pal, sizes, per_size, topics):
     recs = []
     for size in sizes:
         budget = BUDGET.get(size, size * 2)
-        spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=True,
+        spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=False,
                     min_word_len=3, time_budget_s=budget)
         for t in topics[:per_size]:
             spec_dict = {"topic": t, "word_source": pal["ws"], "size": size, "seed": 0}

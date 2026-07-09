@@ -49,7 +49,7 @@ def _init_worker(engine_path, size):
         eng=eng, size=size, theme_set=set(theme), words=words,
         idx=eng._index_by_length(words), scores=edu["scores"], clean_set=edu["clean_set"],
         full={(r, c) for r in range(size) for c in range(size)},
-        spec=Spec(size=size, topic_words=tuple(theme), require_symmetry=True,
+        spec=Spec(size=size, topic_words=tuple(theme), require_symmetry=False,
                   min_word_len=3, time_budget_s=float(size * 2)),
     )
 

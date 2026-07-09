@@ -92,7 +92,7 @@ def score_one(code, pal, size, topic):
     if res["status"] != "ok" or not res.get("result"):
         return z
     lay = res["result"]
-    spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=True,
+    spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=False,
                 min_word_len=3, time_budget_s=budget)
     try:
         m = score(lay, spec, pal["allowed"], runtime_s=res["runtime_s"], vocab_set=pal["clean_set"])

@@ -32,7 +32,7 @@ def score_prog(code, pal, sizes):
         if res["status"] != "ok" or not res.get("result"):
             out[size] = {"valid": 0, "reasons": [f"runner: {res['status']}"], "rt": res.get("runtime_s", 0.0)}
             continue
-        spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=True,
+        spec = Spec(size=size, topic_words=tuple(pal["targets"]), require_symmetry=False,
                     min_word_len=3, time_budget_s=budget)
         m = score(res["result"], spec, pal["allowed"], runtime_s=res["runtime_s"], vocab_set=pal["clean_set"])
         out[size] = {"valid": m["valid"], "reasons": list(m["reasons"]), "coverage": m["coverage"],

@@ -29,7 +29,7 @@ Claude, the user has to build or specify each of these themselves:
 
 | You must supply | Why the raw model can't do without it |
 |---|---|
-| **An eval harness / deterministic verifier** | The model has **no ground truth**. It cannot tell you whether its own emitted generator produces a *valid* grid — 180° symmetry, every run ≥ 3, every white cell checked both ways, every entry drawn from the word source, density in range, within the time budget. Without a scorer you wrote yourself, "passable" is unmeasurable, and the model happily returns buggy or invalid code that *looks* right. |
+| **An eval harness / deterministic verifier** | The model has **no ground truth**. It cannot tell you whether its own emitted generator produces a *valid* grid — every run ≥ 3, every white cell checked both ways, every entry drawn from the word source, density in range, within the time budget. Without a scorer you wrote yourself, "passable" is unmeasurable, and the model happily returns buggy or invalid code that *looks* right. |
 | **Existing approaches (algorithmic scaffolding)** | Asked cold, the model reinvents CSP fill from scratch and gets it wrong (times out, backtracks forever, leaves holes). You have to hand it the canonical methods — AC-3 / MAC arc-consistency, MRV ordering, forward checking, a pattern index, beam search — **and** a pre-verified grid-template library for large grids (random 11×11 construction fills < ~10% of the time). The model is only somewhat reliable when it's *combining given scaffolding*, not originating it. |
 | **A word source + vocabulary definition** | The model never picks the words; "vocabulary-optimized" is meaningless until *you* define the target set (here: crossword-scored ∩ frequency ∩ dictionary + SAT). Leave this to the model and it invents words or fills with junk. |
 | **A precise task contract (spec)** | The exact function signature, the output layout dict, and the hard rules have to be pinned down, or the model emits something unscoreable and every run is differently shaped. |
@@ -42,134 +42,169 @@ Claude, the user has to build or specify each of these themselves:
   filter. Passable-looking, not actually good.
 - **Even with the apparatus supplied, it's inconsistent.** The generators built during
   this project — *with* the harness, seeds, and spec already in hand — were **not**
-  one-shot successes. **~25% of first-run scripts failed** (9/12 valid: deadline
+  successes. **~25% of first-run scripts failed** (9/12 valid: deadline
   overruns, a scorer dict-vs-set bug, a failure-label substring bug, etc.). Every
   failure was caught only *because* the eval harness existed, and fixed only by
   iteration. "Passable but inconsistent" is the ceiling of the raw model even after the
   user has done all the setup work.
 
-## EVAL — measured, unaugmented Claude (held-out, `pipeline/eval_selfmodel.py`, 2026-07-08)
+## EVALS
 
-The anecdote above, turned into numbers. **Setup, chosen to be scrupulously fair to the model:**
+We have run **three evaluations of unaugmented `claude-opus-4-8`** on this task — two core
+English evals (**EVAL 1** and **EVAL 2**) plus a Spanish portability check (the **Extra
+Eval** at the end):
 
-- **Clean-room prompt.** The model is given *only* the task rules + output schema — **zero
-  algorithm hints** (no CSP / MRV / AC-3 / beam / templates), verified by an automated
-  term scan of the exact prompt. It must originate construction *and* fill itself.
-- **One shot, no augmentation.** It emits a single program; it cannot execute, test,
-  iterate, or see our engines / template library / verify-loop.
+- **Clean-room / bare prompt.** The model gets *only* the task rules + output schema —
+  **zero algorithm hints** (no CSP / MRV / AC-3 / beam / templates), verified by an
+  automated term scan of the exact prompt. It must originate construction *and* fill.
 - **`word_source` is injected at runtime.** The program is *handed* the full clean palette
   when scored — ~27k English words (SAT theme + educational fill) or ~17k+ Spanish
-  (wordfreq ∩ a real dictionary). It is **never starved of words** — it receives the list
+  (wordfreq ∩ a real dictionary). It is **never starved of words**; it receives the list
   as its argument, exactly as the contract specifies. (Fairness confirmed: a *working*
   generator scores 100% valid at 7/9 through this identical path.)
 - **Scored by the harness + a real-dictionary check.** `fullyOK%` = structurally valid
   **and** every entry a real dictionary word — palette membership alone is not trusted
-  (raw frequency lists contain acronyms/proper nouns, and stubbed fills produce
-  placeholder runs).
+  (raw frequency lists contain acronyms/proper nouns; stubbed fills produce placeholder
+  runs). Validity is the **functional** criterion — square grid, low black-square density,
+  every across/down run a real interlocking word.
 
-### Result — one unaugmented Claude program, 8 seeds/size
+Every generation in all three evals returned **parseable code (100% parse rate)** — what
+fails below is the *crosswords*, not code that wouldn't run.
 
-English (sizes 7/9/11/15):
+**What each eval isolates (two distinct failures).** The evals are designed to separate the
+two hard parts of the task:
 
-| size | valid% | fullyOK% | within% | dictOK |
+- **EVAL 1 supplies the word list.** The clean-room contract hands the model an explicit
+  `word_source` ("use ONLY these words") and the harness injects the full palette at scoring
+  time. Word *selection* is therefore removed from the model's job — so this eval isolates
+  Claude's ability at **grid construction and filling** (build a dense grid and interlock the
+  *given* words). It fails there anyway (~6% valid, 0% at the large grids). (The Extra Spanish
+  eval at the end is this same condition in another language.)
+- **EVAL 2 is open-ended.** The bare `eval.jsonl` deployment prompt names no word list, so
+  the model must *also* choose its own words. This exposes Claude's **word-selection**
+  limitation on top of construction — and it shows up plainly: run on their own terms, 32%
+  of all placed runs are non-words / gibberish crossings (invented or misspelled words).
+
+In short: **give Claude the words and it still can't build the grid (EVAL 1); leave the
+words open and it also picks bad ones (EVAL 2).** The tuned SLM targets both — a verified
+construction+fill algorithm, constrained to the curated word list.
+
+**Metric key** (the columns in every per-size table below):
+
+- **`size`** — grid dimension. Every crossword is square (`size × size`) and each size is
+  scored independently, so the per-size rows show *where* the model fails, not just an
+  average.
+- **`valid%`** — the **functional** validity rate (the scorer's `valid` flag): exactly
+  `size × size`, every across/down run ≥ 3 letters, every white cell part of **both** an
+  across and a down entry (checked in both directions), every run a real word from the
+  provided `word_source`, no crossing-letter conflicts, and all white cells forming one
+  connected region. Deliberately **excludes** 180° rotational symmetry. Note: black-square
+  density is *reported* (`fill_density`) and used as a soft target, but is **not** a
+  validity gate — a sparse grid can still be `valid` if its runs interlock and are all real
+  words. This is the headline number.
+- **`fullyOK%`** — the **strict** success rate: `valid` **and** every entry additionally
+  confirmed against a real dictionary. Palette membership alone is not trusted — raw
+  frequency lists carry acronyms/proper nouns, and stubbed fills leave placeholder runs — so
+  `fullyOK%` re-checks each answer against a dictionary. By construction `fullyOK% ≤ valid%`.
+- **`within%`** — the full **quality bar**: `valid` **and** filler ≤ 30% **and** no invalid
+  crossing/entry connections **and** the generated program *runs* inside its per-size time
+  budget. The time limit here is on **how long the emitted code takes to execute** (to
+  construct + fill the grid), **not** how long the model took to write the code. Per-size
+  budgets: 7×7 = 3 s, 9×9 = 5 s, 11×11 = 12 s, 15×15 = 30 s. Reported to separate "wrong"
+  from "too slow": the default clean-room fleet runs (EVAL 1 and the Extra Spanish eval)
+  give each program up to 60 s to execute, so `valid%` credits slow-but-correct grids while
+  `within%` additionally requires
+  finishing inside the tighter per-size budget above — the gap between them is grids that
+  are correct but too slow. Either way the large grids are 0%, so the failure is capability,
+  not clock.
+- **`dictOK%`** — a looser, **word-level** measure reported *whether or not* the grid is
+  valid: the **mean fraction** of placed entries (≥ 3 letters) that are real dictionary
+  words, averaged across all generations — **not** a per-grid pass/fail. Because a `valid`
+  grid is ~all real words, this sits at or above `valid%` in practice; the surplus over
+  `valid%` is grids made of real words that still aren't valid crosswords (e.g. sparse /
+  degenerate fills with little interlock, or non-word *crossings* that break validity
+  without making every entry fake).
+
+### EVAL 1 — English clean-room fleet (50 independent Opus agents, 2026-07-08)
+
+50 independent `claude-opus-4-8` generations (temperature 1.0) under the clean-room
+contract, run in the **fair default timing condition**: the prompt has **no "return
+within a few seconds" clause**, and each emitted program is given up to **60 s** to
+execute — so the model is never penalized for a slow-but-correct fill. Scored across
+sizes 7/9/11/15 (**n = 50 per size, 200 scored**):
+
+| size | valid% | fullyOK% | within% | dictOK% |
 |---|---|---|---|---|
-| 7×7 | 0 | 0 | 0 | 0 |
-| 9×9 | 0 | 0 | 0 | 0 |
+| 7×7 | 12 | 12 | 10 | 12 |
+| 9×9 | 10 | 10 | 6 | 10 |
 | 11×11 | 0 | 0 | 0 | 0 |
-| 15×15 | 0 | 0 | 0 | 50 |
-| **all** | **0** | **0** | **0** | 12 |
+| 15×15 | 0 | 0 | 0 | 0 |
+| **all** | **~6** | **~6** | **4** | **~6** |
 
-Spanish (sizes 7/9/11):
+- Unaugmented Opus is valid **~6%** of the time without time pressure.
+- It peaks at the **small grids (7×7 12%, 9×9 10%)** and **collapses to 0% at both 11×11
+  and 15×15** — the large, dense, long-word grids fail outright even given 60 s to run.
+- `within%` sits *below* `valid%` (10 vs 12 at 7×7, 6 vs 10 at 9×9): the gap is grids that
+  are correct but exceed the tighter per-size **code-runtime** budget (3–5 s) — i.e. some
+  valid grids only completed thanks to the generous 60 s runner.
 
-| size | valid% | fullyOK% | within% | dictOK |
-|---|---|---|---|---|
-| 7×7 | 0 | 0 | 0 | 0 |
-| 9×9 | 0 | 0 | 0 | 0 |
-| 11×11 | 0 | 0 | 0 | 0 |
-| **all** | **0** | **0** | **0** | 0 |
+**Timing is not the lever.** A separate 100-generation fleet run (*with* the strict "return
+within a few seconds" prompt clause **and** the tight per-size execution timeout - each
+program hard-killed at its per-size budget (7×7 = 3 s, 9×9 = 5 s, 11×11 = 12 s, 15×15 = 30 s)
+rather than the generous 60 s above) gives the same picture: EN valid **5 / 11 / 3 / 0** by
+size. So going from time-pressured to relaxed did not raise the large grids (11×11 3→0,
+15×15 0→0) and small grids stayed in the same ~5–12% band; the differences are sampling
+noise (n=50 relaxed vs n=100 tight). The big-grid collapse is a genuine capability limit,
+not "not fast enough."
 
-**Zero valid crosswords across all 56 attempts, both languages.**
+### EVAL 2 — Held-out `eval.jsonl` deployment prompt, run as-is (100 Opus agents, 2026-07-09)
 
-### The failure is fundamental, not lazy
-The program was a *competent-looking* attempt: symmetric black-square generation,
-structural validation (min-3, all-checked, connected), MRV-ordered backtracking with
-theme-first value ordering, and a greedy fallback. It still scored 0% because:
+The base-vs-tuned comparator. EVAL 1 uses our clean-room contract (an explicit word list);
+**this eval uses the actual held-out `eval.jsonl` deployment prompt** — the bare user
+message the tuned SLM will receive in production. And to remove any "the 0% is just an API/format mismatch"
+objection, we **ran each of the 100 emitted programs as-is on its own interface**
+(`python <program>`) and judged the crossword it actually printed — **no contract
+conformance required**.
 
-1. Its pattern search **accepted a zero-black, all-white grid first**, which forces a full
-   N×N **word square** (every row *and* column a valid word) — effectively unfillable at
-   any real size.
-2. The fill then dead-ends almost instantly (`rt ≈ 0`), and the fallback leaves slots as
-   `?`-strings → invalid.
-3. The English-vs-Spanish gap (`dictOK` 50% at EN-15 vs **0 everywhere in Spanish**) shows
-   the few "real" words were incidental English surface knowledge, not genuine fill from
-   the provided `word_source`. Swap the language and even that vanishes — proof it never
-   actually solved the constraint problem.
+Scored through the harness (bare prompt, n=100, 25 per size): **0/100 valid at every
+size.** Run **as-is on their own terms**:
 
-**This is the strong form of the thesis:** a one-shot generator that *reads* correct and
-produces **zero** valid crosswords. The hard part — satisfying the interlocking fill from
-an arbitrary word list — is precisely what unaugmented Claude fails, in any language, and
-is exactly what the verified pipeline + template library supplies.
-
-### Fleet — 100 independent Opus generations (same clean-room prompt)
-
-To confirm the single program above wasn't just a bad draw, we ran **100 independent
-`claude-opus-4-8` generations** under the *identical* clean-room prompt (temperature 1.0),
-**100% of which returned parseable code**, and scored each across sizes on both languages
-(n = 100 per size):
-
-English:
-
-| size | valid% | fullyOK% | within% | dictOK |
-|---|---|---|---|---|
-| 7×7 | 5 | 5 | 5 | 7 |
-| 9×9 | 11 | 11 | 11 | 12 |
-| 11×11 | 3 | 3 | 3 | 3 |
-| 15×15 | 0 | 0 | 0 | 1 |
-| **all** | **5** | **5** | **5** | 6 |
-
-Spanish:
-
-| size | valid% | fullyOK% | within% | dictOK |
-|---|---|---|---|---|
-| 7×7 | 8 | 8 | 8 | 9 |
-| 9×9 | 13 | 13 | 13 | 13 |
-| 11×11 | 0 | 0 | 0 | 1 |
-| **all** | **7** | **7** | **7** | 8 |
-
-Reading it:
-
-- Across **700 scored generations**, unaugmented Opus is valid **~5% (EN) / ~7% (ES)** of
-  the time — one shot, no iteration.
-- It peaks at **9×9 (~11–13%)** and **collapses to 0% at the large grid** (15×15 EN,
-  11×11 ES) — the dense, long-word grids are where it fails outright.
-- **`fullyOK% ≈ valid%` and filler is 0% on the valid ones** → when Opus succeeds it fills
-  honestly from the provided `word_source`; the low numbers are not a dirty-palette
-  artifact. (The single web submission's flat 0% was simply a below-average draw.)
-
-### Time-relaxed re-run (is the low score just a timeout artifact?)
-
-To rule out the time budget, we re-ran the fleet (n=50) with the "return within a few
-seconds" clause **removed** from the prompt and the runner timeout raised to **60 s**. It
-did **not** rescue the baseline:
-
-| size | EN valid% (tight → 60 s) | ES valid% (tight → 60 s) |
+| outcome | share | detail |
 |---|---|---|
-| 7×7 | 5 → 12 | 8 → 10 |
-| 9×9 | 11 → 10 | 13 → 8 |
-| 11×11 | 3 → **0** | 0 → **0** |
-| 15×15 | 0 → **0** | — |
+| **No crossword produced** ("unfillable") | **54%** | 32 crash (exception); 14 run but report **no solution** (their own solver can't fill their own grid); 7 print no grid; 1 hangs |
+| **Printed a filled grid — but invalid** | **46%** | every one fails validity (below) |
+| **Valid crossword** | **0%** | — |
 
-Small-grid rates stayed in the same ~8–12% band (differences are within sampling noise,
-n=50 vs 100), and **11×11 / 15×15 stayed at 0% even with 60 seconds**. So the large-grid
-collapse is a genuine capability limit — unaugmented Opus can't construct *and* fill a
-dense big grid **at all**, not merely "not fast enough."
+Of the 46 filled grids, **32 were analyzable**; the other 14 print box-drawing borders +
+row-number gutters that the matrix parser can't structure (the *code ran fine* — an
+output-format limitation; spot-checks show the same failures). The produced grids average
+**47% black squares** (a real crossword is ~16%) and split into two failure modes — Opus
+can't escape the dilemma:
 
-### Contrast — the verified pipeline through the *same* harness
+- **A — real crossword density (≤35% black): 10 grids → 10/10 have non-word crossings.**
+  Attempt a properly dense, interlocked grid and the perpendicular runs come out as
+  gibberish (`EOQUYCITY`, `BEVXGE`, `CNCL`, misspelled `PIUDENT`).
+- **B — degenerate / sparse (>35% black, mean 55%): 22 grids.** These reach "all real
+  words" only by making ~half the grid black — isolated words with almost no interlock.
+  Real words, but not a crossword.
+- **0 achieve dense *and* all-real-word** (the functional definition of valid).
 
-Running the pipeline's own generators back through `eval_selfmodel` (construct engine at
-7/9, the fixed-template engines at 11/15), English:
+Across the produced grids, **155 / 478 (32%) of all placed across/down runs are not real
+dictionary words**; among grids with any faulty crossing, on average **39%** of that
+grid's runs are non-words.
 
-| size | valid% | fullyOK% | dictOK | engine |
+**So the 0% is a genuine capability failure, not an API artifact.** On their own terms,
+unaugmented Opus programs either can't fill the grid at all (54%), fill a dense grid with
+gibberish crossings (mode A), or reach real words only by going ~half-black and
+non-interlocking (mode B).
+
+### Comparator — the verified pipeline through the *same* harness
+
+Not one of the three evals — the baseline they are measured against. Running the
+pipeline's own generators back through the identical harness (construct engine at 7/9, the
+fixed-template engines at 11/15), English:
+
+| size | valid% | fullyOK% | dictOK% | engine |
 |---|---|---|---|---|
 | 7×7 | 100 | 100 | 100 | construct |
 | 9×9 | 83 | 83 | 83 | construct |
@@ -181,7 +216,7 @@ The gap, measured end-to-end from the identical harness: **~5–7% (unaugmented 
 and 15×15**, the exact sizes where random construction collapses and the pre-verified
 template library takes over. (Honesty note: the *construct* engine is not itself flawless
 — it missed one 9×9 fill in this small sample; the clean 100% at 11/15 comes from the
-template library, and reliable *one-shot* generation across all sizes is what the
+template library, and reliable generation across all sizes is what the
 fine-tuned SLM is meant to distill.)
 
 ### Representative generations (inspectable)
@@ -201,8 +236,8 @@ The numbers above are Claude, and Claude was the **best** of the frontier models
 The others did worse, and did worse on a *far easier* version of the task:
 
 - **ChatGPT (GPT-5.5)** and **Gemini (Gemini 3.5 Flash)** struggled even on **free-form
-  crosswords** — the constraint-relaxed variant with *no* fixed grid, *no* 180° symmetry,
-  and *no* full-interlock requirement, where words just have to cross somewhere. That is
+  crosswords** — the constraint-relaxed variant with *no* fixed grid and *no*
+  full-interlock requirement, where words just have to cross somewhere. That is
   dramatically easier to implement than the dense, fully-checked fixed grid this project
   targets, and they still could not do it reliably.
 - So the gap is a property of **frontier LLMs on constraint-satisfaction code
@@ -220,7 +255,7 @@ burden being described — it is work the user must currently do by hand.
 
 | | validity | vocabulary | filler | time |
 |---|---|---|---|---|
-| Raw Claude, unaided | ~5–7% valid (100-sample eval; **0%** at 11/15) | **~6%** (4/66) | high | ~1 hour |
+| Raw Claude, unaided | ~5–7% valid (clean-room fleet; **0%** at 11/15) | **~6%** (4/66) | high | ~1 hour |
 | Verified pipeline generators | **~83–100%** valid (**100%** at 11/15 via templates) | **~11–24%** strict-SAT (2–4×) | **~0%** crosswordese | sub-second |
 
 Two honest caveats:
@@ -240,9 +275,9 @@ Two honest caveats:
   hand-building an eval harness, sourcing canonical algorithms, defining a vocabulary,
   writing a spec, and wrapping a search loop around the model, the tuned SLM **distills
   the output of that whole (Claude + verifier + search + scaffolding) system into
-  reliable one-shot generation** - the capability, without the apparatus.
+  reliable generation** - the capability, without the apparatus.
 - **The 4/66 hour and the 25% first-run failure are the eval baseline.** The
-  base-vs-tuned test: give the base 4B (and one-shot Claude) the same held-out `eval`
+  base-vs-tuned test: give the base 4B (and Claude) the same held-out `eval`
   specs, run their emitted generators through the harness, and show they produce
   invalid / ~6%-vocab / timed-out programs at a high failure rate, while the tuned model
   produces valid, clean, in-budget generators at high pass@1. That turns the anecdote
@@ -269,7 +304,32 @@ Requirements:
   {"rows": int, "cols": int,
    "cells": [{"r","c","letter","number"(optional)}],
    "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
-- Satisfy ALL: exactly size x size; black squares in 180-degree rotational symmetry; every white run (across and down) >= 3 letters; every white cell part of BOTH an across and a down entry; all white cells form one connected region; every entry a real word from word_source; high white-square density.
+- Satisfy ALL: exactly size x size; every white run (across and down) >= 3 letters; every white cell part of BOTH an across and a down entry; all white cells form one connected region; every entry a real word from word_source; high white-square density.
 - Handle sizes 7, 9, 11, and 15.
 
 Output only the Python code.
+
+## Extra Eval — Spanish clean-room fleet (50 independent Opus agents, 2026-07-08)
+
+A language-portability check, kept separate from the core base-vs-tuned story above. It is
+the same condition as EVAL 1 (clean-room prompt, `word_source` supplied, default 60 s
+timing) but with a **Spanish palette** (wordfreq('es') ∩ a real Spanish dictionary), sizes
+7/9/11 (**n = 50 per size, 150 scored**):
+
+| size | valid% | fullyOK% | within% | dictOK% |
+|---|---|---|---|---|
+| 7×7 | 10 | 10 | 8 | 10 |
+| 9×9 | 8 | 8 | 4 | 8 |
+| 11×11 | 0 | 0 | 0 | 0 |
+| **all** | **6** | **6** | **4** | **6** |
+
+- Valid **6%** overall; peaks at the **small grids (7×7 10%, 9×9 8%)** and **0% at 11×11**
+  (the largest Spanish size tested) — the same shape as English (EVAL 1).
+- **The failure is structural, not a language artifact.** Spanish rates sit in the same
+  band as English (7×7 10 vs 12, 9×9 8 vs 10, large-grid 0 vs 0). If Opus were succeeding
+  by leaning on memorized English words rather than genuinely solving the interlocking
+  constraint, Spanish would fall apart — it doesn't. Both languages collapse at the large
+  grid for the same reason: the constraint-satisfaction fill, not vocabulary.
+- As in English, `within%` dips below `valid%` (8 vs 10, 4 vs 8): correct-but-slow grids
+  that exceed the per-size code-runtime budget. The strict-timing cross-check (n=100)
+  gives ES valid **8 / 13 / 0** — same shape, large grid 0% either way.

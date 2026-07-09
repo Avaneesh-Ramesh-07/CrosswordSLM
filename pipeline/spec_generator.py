@@ -166,7 +166,7 @@ def _weighted_sample(rng: random.Random, items, weights, k):
 
 
 def sample_spec(rng: random.Random, spec_id: str, size: int, hint_weights=None) -> SpecRecord:
-    require_symmetry = size <= 5 or rng.random() > 0.15  # mostly symmetric
+    require_symmetry = False  # symmetry optional (NYT convention, not a validity gate)
     difficulty = rng.choice(DIFFICULTY)
     density = round(DENSITY_TARGET[size] + rng.choice([-0.02, 0.0, 0.0, 0.02]), 2)
     n_hints = rng.choice([0, 1, 1, 2, 2, 3])
