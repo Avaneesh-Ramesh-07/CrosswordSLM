@@ -33,6 +33,13 @@ cells = [
  (CO, "!pip install -q -U 'transformers==4.53.*' 'trl==0.19.1' 'peft==0.16.*' "
       "'bitsandbytes==0.46.*' 'accelerate==1.8.*' 'datasets==3.6.*'"),
 
+ (MD, "> **Expected pip warning -- safe to ignore.** You'll likely see a resolver "
+      "complaint that Colab's pre-installed `gradio` wants `huggingface-hub>=1.2` but "
+      "`huggingface-hub 0.36.x` is installed. That 0.3x version is **required** by "
+      "`transformers 4.53`, and `gradio` is **not used** anywhere in this notebook, so the "
+      "conflict is cosmetic -- the install still succeeds. **Do not upgrade "
+      "`huggingface-hub`** (it would break `transformers`)."),
+
  (MD, "## 2. Get the data\n"
       "**Do ONE of these** (the notebook will not invent data):\n"
       "- **Clone your repo:** set `REPO_URL` below to your GitHub repo. The committed "
