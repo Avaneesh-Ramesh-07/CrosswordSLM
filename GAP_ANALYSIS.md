@@ -78,7 +78,7 @@ two hard parts of the task:
   `word_source` ("use ONLY these words") and the harness injects the full palette at scoring
   time. Word *selection* is therefore removed from the model's job — so this eval isolates
   Claude's ability at **grid construction and filling** (build a dense grid and interlock the
-  *given* words). It fails there anyway (~6% valid, 0% at the large grids). (The Extra Spanish
+  *given* words). It fails there anyway (~5% valid, ≤2% at the large grids). (The Extra Spanish
   eval at the end is this same condition in another language.)
 - **EVAL 2 is open-ended.** The bare `eval.jsonl` deployment prompt names no word list, so
   the model must *also* choose its own words. This exposes Claude's **word-selection**
@@ -130,32 +130,40 @@ construction+fill algorithm, constrained to the curated word list.
 50 independent `claude-opus-4-8` generations (temperature 1.0) under the clean-room
 contract, run in the **fair default timing condition**: the prompt has **no "return
 within a few seconds" clause**, and each emitted program is given up to **60 s** to
-execute — so the model is never penalized for a slow-but-correct fill. Scored across
-sizes 7/9/11/15 (**n = 50 per size, 200 scored**):
+execute — so the model is never penalized for a slow-but-correct fill. The word list handed
+to the model is the **fully-filtered vocabulary set** (`WORD_LIST_FULLY_PURIFIED`, 24,542
+words — every entry a real dictionary word with a WordNet common-word sense; acronyms, proper
+nouns, and no-meaning tokens removed). Scored across sizes 7/9/11/15 (**n = 50 per size, 200
+scored**):
 
 | size | valid% | fullyOK% | within% | dictOK% |
 |---|---|---|---|---|
-| 7×7 | 12 | 12 | 10 | 12 |
-| 9×9 | 10 | 10 | 6 | 10 |
-| 11×11 | 0 | 0 | 0 | 0 |
+| 7×7 | 6 | 6 | 6 | 6 |
+| 9×9 | 12 | 12 | 6 | 14 |
+| 11×11 | 2 | 2 | 2 | 2 |
 | 15×15 | 0 | 0 | 0 | 0 |
-| **all** | **~6** | **~6** | **4** | **~6** |
+| **all** | **5** | **5** | **~4** | **5** |
 
-- Unaugmented Opus is valid **~6%** of the time without time pressure.
-- It peaks at the **small grids (7×7 12%, 9×9 10%)** and **collapses to 0% at both 11×11
-  and 15×15** — the large, dense, long-word grids fail outright even given 60 s to run.
-- `within%` sits *below* `valid%` (10 vs 12 at 7×7, 6 vs 10 at 9×9): the gap is grids that
-  are correct but exceed the tighter per-size **code-runtime** budget (3–5 s) — i.e. some
-  valid grids only completed thanks to the generous 60 s runner.
+- Unaugmented Opus is valid **~5%** of the time even when handed a clean vocabulary and given
+  no time pressure.
+- It peaks at **9×9 (12%)**, is weak at **7×7 (6%)**, and **collapses at the large grids —
+  11×11 2%, 15×15 0%** — the dense, long-word grids fail almost outright even given 60 s to run.
+- `within%` sits *below* `valid%` at 9×9 (6 vs 12): those are grids that are correct but exceed
+  the tighter per-size **code-runtime** budget (3–5 s) — i.e. some valid grids only completed
+  thanks to the generous 60 s runner.
+- **A cleaner word list did not raise Claude's ceiling.** The *same* 50 programs re-scored on
+  three palettes give the same picture — original pre-cleaning **~6%**, acronym-cleaned **8%**,
+  fully-filtered **5%** overall valid (11×11: 0 / 6 / 2%). The spread is sampling noise on
+  n=50; grid **construction + fill**, not vocabulary quality, is the bottleneck.
 
 **Timing is not the lever.** A separate 100-generation fleet run (*with* the strict "return
 within a few seconds" prompt clause **and** the tight per-size execution timeout - each
 program hard-killed at its per-size budget (7×7 = 3 s, 9×9 = 5 s, 11×11 = 12 s, 15×15 = 30 s)
-rather than the generous 60 s above) gives the same picture: EN valid **5 / 11 / 3 / 0** by
-size. So going from time-pressured to relaxed did not raise the large grids (11×11 3→0,
-15×15 0→0) and small grids stayed in the same ~5–12% band; the differences are sampling
-noise (n=50 relaxed vs n=100 tight). The big-grid collapse is a genuine capability limit,
-not "not fast enough."
+rather than the generous 60 s above, on the broader pre-purification palette) gives the same
+picture: EN valid **5 / 11 / 3 / 0** by size. So going from time-pressured to relaxed did not
+raise the large grids (11×11 3→2, 15×15 0→0) and small grids stayed in the same ~5–12% band;
+the differences are sampling noise. The big-grid collapse is a genuine capability limit, not
+"not fast enough."
 
 ### EVAL 2 — Held-out `eval.jsonl` deployment prompt, run as-is (100 Opus agents, 2026-07-09)
 
@@ -212,7 +220,7 @@ fixed-template engines at 11/15), English:
 | 15×15 | 100 | 100 | 100 | fixed-template |
 
 The gap, measured end-to-end from the identical harness: **~5–7% (unaugmented Opus) vs
-~83–100% (pipeline)** overall, and — at the real crossword sizes — **0% vs 100% at 11×11
+~83–100% (pipeline)** overall, and — at the real crossword sizes — **≤2% vs 100% at 11×11
 and 15×15**, the exact sizes where random construction collapses and the pre-verified
 template library takes over. (Honesty note: the *construct* engine is not itself flawless
 — it missed one 9×9 fill in this small sample; the clean 100% at 11/15 comes from the
@@ -255,7 +263,7 @@ burden being described — it is work the user must currently do by hand.
 
 | | validity | vocabulary | filler | time |
 |---|---|---|---|---|
-| Raw Claude, unaided | ~5–7% valid (clean-room fleet; **0%** at 11/15) | **~6%** (4/66) | high | ~1 hour |
+| Raw Claude, unaided | ~5–7% valid (clean-room fleet; **≤2%** at 11/15) | **~6%** (4/66) | high | ~1 hour |
 | Verified pipeline generators | **~83–100%** valid (**100%** at 11/15 via templates) | **~11–24%** strict-SAT (2–4×) | **~0%** crosswordese | sub-second |
 
 Two honest caveats:
