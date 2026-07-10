@@ -20,4 +20,7 @@ data/collaborative-word-list/.git/
 finetuned-models/
 
 # generated runs from eval
-slm_runs/
+slm_runs_not_hardcoded/
+
+# api keys
+.env.local

@@ -166,6 +166,15 @@ def main(argv=None):
     if not parsed:
         sys.exit("no programs parsed")
 
+    # SAVE every emitted program so the run is reproducible / re-scorable later.
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    progdir = os.path.join(_root, "runs", "eval", "fleet_progs")
+    os.makedirs(progdir, exist_ok=True)
+    for i, c in enumerate(parsed):
+        with open(os.path.join(progdir, f"prog_{i:03d}.py"), "w", encoding="utf-8") as fh:
+            fh.write(c)
+    print(f"saved {len(parsed)} programs -> {progdir}", flush=True)
+
     print("building EN + ES palettes...", flush=True)
     pals = {"en": (english_palette(15), [7, 9, 11, 15]), "es": (spanish_palette(11), [7, 9, 11])}
     results = {}

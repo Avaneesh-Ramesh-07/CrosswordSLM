@@ -103,7 +103,14 @@ _DICT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 
 # Proper nouns / acronyms that slip through the dictionary word list (they happen
 # to appear in words_alpha) but are not vocabulary. Extend as leaks are spotted.
-_NOT_VOCAB = {"CIA", "HORATIO", "NIELSEN", "FBI", "NASA", "NATO", "ROC"}
+_NOT_VOCAB = {
+    # proper nouns
+    "CIA", "HORATIO", "NIELSEN", "FBI", "NASA", "NATO", "ROC",
+    # acronyms / initialisms / abbreviations (look like words but carry no word meaning).
+    # Real short words (RUE, FEZ, WRY, VEX, ...) are intentionally kept.
+    "ABC", "AKA", "AWOL", "ETC", "FAQ", "GPS", "IRA", "IRS", "LCD", "MIA",
+    "MPH", "MRS", "MSG", "PTA", "RSVP", "TNT", "TPS", "UFO", "VIN",
+}
 
 
 def _load_wordset(path):
