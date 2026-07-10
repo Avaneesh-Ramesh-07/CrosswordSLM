@@ -1,15 +1,14 @@
-"""Generate train/colab_eval_tuned.ipynb — EVAL 2 for the tuned crossword SLM.
+"""Generate train/colab_eval_tuned.ipynb — query the tuned SLM and SAVE its programs.
 
-Runs EVAL 2 (held-out eval.jsonl, BARE deployment prompt) on the merged fine-tuned
-model, scored the SAME way as Claude's EVAL 2 (pipeline.eval_opus_fleet.score_one on the
-clean English palette + real-dictionary check). This is the base-vs-tuned headline:
-Claude Opus scored 0/100 on these identical bare prompts (GAP_ANALYSIS EVAL 2).
+This notebook does ONE job: feed the held-out `eval.jsonl` deployment prompts to the tuned
+**hardcoded-words** model and **save every emitted `generate_crossword` program together with
+its input spec** into a zip you download. It does NOT score anything.
 
-Why no separate "as-is" run (Claude EVAL 2 had one): Claude didn't conform to our
-generate_crossword contract, so we ran its programs on their own interface to rule out an
-API-mismatch artifact. The tuned model is trained to emit a conforming
-generate_crossword(topic, word_source, size) FUNCTION, so calling it and scoring the
-returned layout (what score_one does) already IS its own-terms test.
+Gauging happens locally (outside Colab): each saved program is run **self-contained** —
+`generate_crossword(topic, word_source=None, size)` so it fills from its OWN baked `_WORDS`
+(exercising the hardcoding) — and the returned crossword is checked by a standalone validator
+(structure + real-dictionary words), exactly the way the 36 hardcoded dataset programs were
+gauged. So Colab only needs a GPU + the model; no palette / wordfreq / scoring code runs here.
 
     python train/make_colab_eval2.py
 """
@@ -22,36 +21,24 @@ MD, CO = "markdown", "code"
 REPO_URL = "https://github.com/Avaneesh-Ramesh-07/CrosswordSLM.git"
 
 cells = [
- (MD, "# EVAL 2 — tuned Qwen3-4B (hardcoded-words) on held-out `eval.jsonl` (bare deployment prompt)\n\n"
-      "The base-vs-tuned **headline**. Each of the held-out `eval.jsonl` specs is fed to the "
-      "tuned model as the **bare** system+user prompt it was trained on (no contract in the "
-      "prompt — the contract lives in the weights). Every emitted `generate_crossword` program "
-      "is scored through the **same** sandbox + scorer + real-dictionary check as Claude's "
-      "EVAL 2 (`pipeline.eval_opus_fleet.score_one`).\n\n"
-      "**Model under test:** the **hardcoded-words** variant "
-      "(`qwen3-4b-crossword-qlora-hardcoded-merged`) — trained on programs that carry their "
-      "vocabulary baked into a `_WORDS` constant (`word_source = word_source or _WORDS`). This "
-      "eval still **supplies `word_source`** (the clean palette), exactly like the baseline "
-      "tuned run and Claude's EVAL 2, so the numbers are directly comparable — it measures grid "
-      "**construction + fill** on identical terms (the supplied palette overrides the baked "
-      "`_WORDS`). Testing the self-contained *\"generate me a crossword, no word list given\"* "
-      "behavior is a separate variant — see the final cell.\n\n"
-      "**Comparison:** unaugmented Claude Opus scored **0/100** on these identical bare prompts "
-      "(GAP_ANALYSIS EVAL 2).\n\n"
-      "> **No separate \"as-is\" run.** Claude's EVAL 2 also ran each program on its own "
-      "interface to rule out an API-mismatch artifact — needed only because Claude didn't "
-      "conform to our contract. The tuned model emits a conforming `generate_crossword` "
-      "*function*, so calling it and scoring the layout (below) already is the own-terms test. "
-      "(Cell 8 optionally dumps the raw programs for manual inspection.)\n\n"
+ (MD, "# Generate + save tuned-SLM programs (hardcoded-words model)\n\n"
+      "One job: feed the held-out `eval.jsonl` **bare deployment prompts** to the tuned "
+      "**hardcoded-words** model (`qwen3-4b-crossword-qlora-hardcoded-merged`) and **save every "
+      "emitted `generate_crossword` program + its input spec** into a zip you download. "
+      "**No scoring happens here.**\n\n"
+      "You then hand the zip to Claude, who **gauges each program locally**: it runs every "
+      "program **self-contained** — `generate_crossword(topic, word_source=None, size)` so the "
+      "program fills from its OWN baked `_WORDS` (this is what *exercises the hardcoding*) — and "
+      "validates the crossword it produces (structure + every entry a real dictionary word). "
+      "That's the identical method already verified on the 36 hardcoded dataset programs "
+      "(36/36 valid).\n\n"
       "**Runtime:** GPU. L4 (24 GB) / A100 (40 GB) recommended; T4 works but generation is slower. "
-      "**Order:** run top to bottom."),
+      "**Order:** run top to bottom, then download the zip from the last cell."),
 
  (MD, "## 1. Get the code\n"
-      "Clone the repo (set your URL) or upload the folder and set `PROJECT_DIR`. The clone "
-      "already contains everything the eval needs: `data/sft/eval.jsonl`, the word lists in "
-      "`data/wordlists/` (incl. `words_alpha.txt`), and the `pipeline/` + `harness/` scoring "
-      "code.\n\n"
-      "> Push your latest local changes first — the eval reflects whatever is committed here."),
+      "Clone the repo (set your URL) or upload the folder and set `PROJECT_DIR`. The clone gives "
+      "us `data/sft/eval.jsonl` (the prompts) and the tiny prompt/extract helpers in "
+      "`pipeline/` — nothing else is needed (no scoring)."),
  (CO, 'REPO_URL = "%s"\n'
       'import os\n'
       '!git clone -q $REPO_URL slm || echo "clone skipped/failed — upload the folder instead"\n'
@@ -60,13 +47,13 @@ cells = [
       '%%cd $PROJECT_DIR' % REPO_URL),
 
  (MD, "## 2. GPU + install deps\n"
-      "Colab already ships torch. We add `transformers`/`accelerate` (pinned to the training "
-      "snapshot) to load the merged model, and `wordfreq` (the English palette intersects the "
-      "wordfreq top-N). No bitsandbytes — the merged model loads in 16-bit directly."),
+      "Colab already ships torch. We add only `transformers`/`accelerate` (pinned to the training "
+      "snapshot) to load the merged model. No `wordfreq`, no `bitsandbytes` — there's no palette "
+      "and no scoring here, and the merged model loads in 16-bit directly."),
  (CO, 'import torch\n'
       'assert torch.cuda.is_available(), "No GPU — Runtime > Change runtime type > GPU (L4/A100 recommended)"\n'
       'print("GPU:", torch.cuda.get_device_name(0))\n'
-      '!pip install -q "transformers==4.53.*" "accelerate==1.8.*" wordfreq'),
+      '!pip install -q "transformers==4.53.*" "accelerate==1.8.*"'),
 
  (MD, "> **Expected pip warning — safe to ignore.** Colab's pre-installed `gradio` wants a "
       "newer `huggingface-hub` than `transformers 4.53` pins. `gradio` is unused here; do **not** "
@@ -117,12 +104,23 @@ cells = [
       'print("loaded:", model.config.model_type, "| dtype", next(model.parameters()).dtype, "| device", model.device)'),
 
  (MD, "## 5. Generation settings + batched helper\n"
-      "`GEN_TEMP = 1.0` matches Claude's EVAL 2 (temperature 1.0). Set it to `0.0` for greedy / "
-      "deterministic decoding (the tuned model's single best output). `MAX_NEW_TOKENS` is generous; "
-      "the tuned programs are compact — raise it only if you see truncated code."),
- (CO, 'GEN_TEMP       = 1.0     # match Claude EVAL 2; use 0.0 for greedy/deterministic\n'
-      'MAX_NEW_TOKENS = 3072   # tuned programs are compact; raise if any get truncated\n'
-      'BATCH          = 8      # lower if you OOM on a small GPU\n\n'
+      "`GEN_TEMP = 1.0` gives varied samples per prompt (the prompts of a given size are nearly "
+      "identical, so temperature is what produces distinct programs). Set `0.0` for greedy / "
+      "deterministic (the model's single best output).\n\n"
+      "**`MAX_NEW_TOKENS` must fit the whole program + word list.** The emitted program is the "
+      "contract header + algorithm + the baked `_WORDS` (+ for 15×15, the inlined grid "
+      "templates). Measured on the dataset programs: **7×7 ~4.2k, 11×11 ~5.6k, 15×15 ~12–14k "
+      "tokens** — so the old 4096 cap would cut off every 11×11 and 15×15 mid-code. We set "
+      "**12288** so nothing the model can emit is truncated at generation.\n\n"
+      "> ⚠️ **15×15 is limited by *training*, not this cap.** The model was fine-tuned at "
+      "`max_seq_length = 8192`, so the ~12–14k-token 15×15 programs were **truncated during "
+      "training** — the model never saw a complete one and can't reliably emit one, whatever "
+      "this cap is. **7×7/9×9/11×11 (≤ ~5.6k tokens) are fully covered.** To make 15×15 work "
+      "you'd retrain at ~14k seq-len (VRAM-heavy) or shrink the 15×15 programs (fewer inlined "
+      "templates / smaller `_WORDS`) to fit under 8192."),
+ (CO, 'GEN_TEMP       = 1.0      # varied samples; use 0.0 for greedy/deterministic\n'
+      'MAX_NEW_TOKENS = 12288   # fit the FULL program: header + algorithm + baked _WORDS (+ 15x15 templates)\n'
+      'BATCH          = 4       # long 15x15 generations grow the KV cache; raise to 8 on an A100\n\n'
       'import torch\n'
       '@torch.no_grad()\n'
       'def generate_batch(pairs):\n'
@@ -144,109 +142,80 @@ cells = [
       '        print(f"  generated {min(i + BATCH, len(pairs))}/{len(pairs)}", flush=True)\n'
       '    return outs'),
 
- (MD, "## 6. EVAL 2 — generate on bare eval.jsonl prompts, score through the harness\n"
-      "Identical to Claude's EVAL 2: sizes 7/9/11/15, 25 prompts per size (n=100, drawn from "
-      "`eval.jsonl` with the same seed), scored by `score_one` on the clean English palette with "
-      "a real-dictionary check on every entry."),
- (CO, 'import os, json, time\n'
-      '# these modules read ANTHROPIC_* via os.environ.get; set dummies so nothing complains\n'
-      'os.environ.setdefault("ANTHROPIC_BASE_URL", ""); os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", "")\n'
+ (MD, "## 6. Generate on the bare `eval.jsonl` prompts, then SAVE programs + specs\n"
+      "Sizes 7/9/11/15, `PER_SIZE` prompts each. For each prompt we save the extracted program "
+      "to `progs/prog_<i>_s<NN>.py` (the size is in the filename so it can be run at the right "
+      "size later), the raw completion to `raw/`, and one row per prompt to `specs.jsonl` "
+      "(`idx, size, prog_file, parsed, system, user`). **No scoring** — that's done locally."),
+ (CO, 'import os, json\n'
       'from pipeline.eval_opus_evalset import load_prompts\n'
-      'from pipeline.eval_opus_fleet import score_one, agg, table\n'
-      'from pipeline.eval_selfmodel import english_palette\n'
       'from pipeline.eval_harness import extract_code\n\n'
       'SIZES = [7, 9, 11, 15]; PER_SIZE = 25\n'
       'prompts = load_prompts("data/sft/eval.jsonl", SIZES, PER_SIZE)   # (system, user, size), BARE\n'
       'print(f"{len(prompts)} bare prompts")\n'
-      'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n'
-      'pal = english_palette(max(SIZES))\n\n'
+      'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n\n'
       'print("generating...", flush=True)\n'
       'comps = generate_batch([(s, u) for (s, u, sz) in prompts])\n\n'
-      'print("scoring...", flush=True)\n'
-      'rows = []\n'
-      'for (s, u, sz), txt in zip(prompts, comps):\n'
+      'OUT = "runs/eval/slm_gen"\n'
+      'os.makedirs(os.path.join(OUT, "progs"), exist_ok=True)\n'
+      'os.makedirs(os.path.join(OUT, "raw"), exist_ok=True)\n'
+      'specs, n_parsed = [], 0\n'
+      'for i, ((s, u, sz), txt) in enumerate(zip(prompts, comps)):\n'
       '    code = extract_code(txt)\n'
-      '    if not code:\n'
-      '        rec = {"valid": 0, "fully": 0, "within": 0, "dict_frac": 0.0, "coverage": 0.0,\n'
-      '               "crossings": 0, "entries": 0, "filler": 0.0, "parsed": 0}\n'
-      '    else:\n'
-      '        rec = score_one(code, pal, sz, "vocabulary"); rec["parsed"] = 1\n'
-      '    rec["size"] = sz; rows.append(rec)\n\n'
-      'parse_rate = sum(r["parsed"] for r in rows) / len(rows)\n'
-      'print(f"\\nparse rate (emitted a code block): {parse_rate*100:.0f}%")\n'
-      'ov = table(f"TUNED Qwen3-4B (hardcoded) on eval.jsonl BARE prompts (n={len(rows)}, temp={GEN_TEMP})", rows, SIZES)'),
+      '    parsed = bool(code); n_parsed += parsed\n'
+      '    # no closing ``` fence -> generation almost certainly hit MAX_NEW_TOKENS mid-code\n'
+      '    looks_truncated = txt.count("```") < 2 or "def generate_crossword" not in (code or "")\n'
+      '    prog_file = f"progs/prog_{i:03d}_s{sz:02d}.py"\n'
+      '    open(os.path.join(OUT, prog_file), "w", encoding="utf-8").write(code or "")\n'
+      '    open(os.path.join(OUT, f"raw/comp_{i:03d}.txt"), "w", encoding="utf-8").write(txt)\n'
+      '    specs.append({"idx": i, "size": sz, "prog_file": prog_file,\n'
+      '                  "parsed": parsed, "looks_truncated": looks_truncated, "system": s, "user": u})\n'
+      'with open(os.path.join(OUT, "specs.jsonl"), "w", encoding="utf-8") as fh:\n'
+      '    for rec in specs:\n'
+      '        fh.write(json.dumps(rec) + "\\n")\n'
+      'json.dump({"model": "qwen3-4b-crossword-qlora-hardcoded-merged", "n": len(prompts),\n'
+      '           "parsed": n_parsed, "sizes": SIZES, "per_size": PER_SIZE, "gen_temp": GEN_TEMP,\n'
+      '           "gauge": "run each prog self-contained: generate_crossword(topic, word_source=None, size)"},\n'
+      '          open(os.path.join(OUT, "meta.json"), "w"), indent=2)\n'
+      'by_size = {sz: sum(1 for r in specs if r["size"] == sz) for sz in SIZES}\n'
+      'n_trunc = sum(r["looks_truncated"] for r in specs)\n'
+      'print(f"\\nparsed {n_parsed}/{len(prompts)} as code | by size: {by_size}")\n'
+      'print(f"looks-truncated (hit MAX_NEW_TOKENS): {n_trunc}"'
+      ' + ("  <-- raise MAX_NEW_TOKENS or expect these to fail" if n_trunc else ""))\n'
+      'trunc_by_size = {sz: sum(1 for r in specs if r["size"] == sz and r["looks_truncated"]) for sz in SIZES}\n'
+      'print(f"  truncated by size: {trunc_by_size}")\n'
+      'print(f"saved programs + specs under {OUT}/")'),
 
- (MD, "## 7. Save results + base-vs-tuned comparison"),
- (CO, 'import os, json, time\n'
-      'os.makedirs("runs/eval", exist_ok=True)\n'
-      'out = f"runs/eval/tuned_evalset_{int(time.time())}.json"\n'
-      'summary = {"model": "qwen3-4b-crossword-qlora-hardcoded-merged", "condition": "bare eval.jsonl prompts (word_source supplied)",\n'
-      '           "n": len(rows), "parse_rate": parse_rate, "gen_temp": GEN_TEMP, "overall": ov,\n'
-      '           "by_size": {s: agg([r for r in rows if r["size"] == s]) for s in SIZES}}\n'
-      'json.dump(summary, open(out, "w", encoding="utf-8"), indent=2)\n'
-      'print("wrote", out)\n'
-      '!mkdir -p /content/drive/MyDrive/slm_runs/eval && cp "$out" /content/drive/MyDrive/slm_runs/eval/ 2>/dev/null || true\n\n'
-      'print("\\n===== EVAL 2 (bare eval.jsonl, harness-scored) — base vs tuned =====")\n'
-      'print(f"  Claude Opus 4.8   : valid  0%   fullyOK  0%   within  0%    [GAP_ANALYSIS EVAL 2, n=100]")\n'
-      'print(f"  Tuned (hardcoded) : valid {ov[\'valid\']*100:3.0f}%   fullyOK {ov[\'fully\']*100:3.0f}%   "\n'
-      '      f"within {ov[\'within\']*100:3.0f}%   (n={len(rows)}, temp={GEN_TEMP})")'),
+ (MD, "## 7. Package for download\n"
+      "Zips `runs/eval/slm_gen/` (programs + `specs.jsonl` + raw completions), copies it to Drive, "
+      "and triggers a browser download. **Hand this zip to Claude** — it has everything needed to "
+      "gauge the run locally."),
+ (CO, 'import shutil, os\n'
+      'zip_path = shutil.make_archive("/content/slm_gen", "zip", "runs/eval/slm_gen")\n'
+      'print("zip:", zip_path, f"({os.path.getsize(zip_path)/1e6:.1f} MB)")\n'
+      '# copy to Drive (so you have a durable copy even if the browser download is flaky)\n'
+      'try:\n'
+      '    dst = "/content/drive/MyDrive/slm_runs/eval"; os.makedirs(dst, exist_ok=True)\n'
+      '    shutil.copy(zip_path, dst); print("copied to", dst)\n'
+      'except Exception as e:\n'
+      '    print("Drive copy skipped:", e)\n'
+      '# direct browser download\n'
+      'try:\n'
+      '    from google.colab import files; files.download(zip_path)\n'
+      'except Exception as e:\n'
+      '    print("auto-download unavailable; grab it from the Files panel or Drive:", e)'),
 
- (MD, "## 8. (Optional) dump the raw programs for inspection\n"
-      "Parallels Claude's saved as-is programs. Writes each emitted program to "
-      "`runs/eval/tuned_progs/` so you can eyeball the actual generators the model produced."),
- (CO, 'import os\n'
-      'os.makedirs("runs/eval/tuned_progs", exist_ok=True)\n'
-      'for k, ((s, u, sz), txt) in enumerate(zip(prompts, comps)):\n'
-      '    code = extract_code(txt) or txt\n'
-      '    open(f"runs/eval/tuned_progs/prog_{k:03d}_s{sz}.py", "w", encoding="utf-8").write(code)\n'
-      'print("saved", len(prompts), "programs under runs/eval/tuned_progs/")'),
-
- (MD, "## (Optional) Self-contained eval — does the baked `_WORDS` actually work?\n"
-      "The eval above **supplies `word_source`**, so it never exercises the hardcoding — it's the "
-      "same construction test as the baseline model. To test the point of the hardcoded variant "
-      "(a user says *\"generate me a crossword\"* with **no word list**), re-score the same "
-      "emitted programs but call them with `word_source=None` so the program must fall back to "
-      "its own baked `_WORDS`. The layout is still scored against the clean palette's dictionary, "
-      "so a valid grid means the model both **wrote a working generator and baked in real, "
-      "placeable words**.\n\n"
-      "```python\n"
-      "from harness.sandbox import run_candidate\n"
-      "from harness.scorer import Spec, score\n"
-      "from pipeline.eval_selfmodel import BUDGET\n"
-      "from pipeline.eval_opus_fleet import agg, table\n"
-      "from pipeline.eval_selfmodel import _norm as norm\n"
-      "rows_sc = []\n"
-      "for (s, u, sz), txt in zip(prompts, comps):\n"
-      "    code = extract_code(txt)\n"
-      "    z = {'valid':0,'fully':0,'within':0,'dict_frac':0.0,'coverage':0.0,'crossings':0,'entries':0,'filler':0.0}\n"
-      "    if code:\n"
-      "        budget = BUDGET.get(sz, sz*2)\n"
-      "        res = run_candidate(code, {'topic':'vocabulary','word_source':None,'size':sz,'seed':0},\n"
-      "                            timeout_s=budget, mem_mb=1024)          # word_source=None -> uses baked _WORDS\n"
-      "        if res['status']=='ok' and res.get('result'):\n"
-      "            lay = res['result']\n"
-      "            spec = Spec(size=sz, topic_words=tuple(pal['targets']), require_symmetry=False,\n"
-      "                        min_word_len=3, time_budget_s=budget)\n"
-      "            try:\n"
-      "                m = score(lay, spec, pal['allowed'], runtime_s=res['runtime_s'], vocab_set=pal['clean_set'])\n"
-      "                ents = [e['answer'] for e in (lay.get('across') or [])+(lay.get('down') or [])\n"
-      "                        if len(str(e.get('answer','')))>=3]\n"
-      "                df = (sum(1 for w in ents if norm(w) in pal['DICT'])/len(ents)) if ents else 0.0\n"
-      "                v = int(m['valid']==1); fl = m['filler_fraction'] or 0.0\n"
-      "                z = {'valid':v,'fully':int(v and df>=0.999),\n"
-      "                     'within':int(v and fl<=0.30 and res['runtime_s']<=budget),\n"
-      "                     'dict_frac':df,'coverage':m['coverage'],'crossings':m['crossings'],\n"
-      "                     'entries':m['n_entries'],'filler':fl}\n"
-      "            except Exception:\n"
-      "                pass\n"
-      "    z['size'] = sz; rows_sc.append(z)\n"
-      "table(f'SELF-CONTAINED (word_source=None, baked _WORDS) n={len(rows_sc)}', rows_sc, SIZES)\n"
-      "```\n\n"
-      "If self-contained validity is far below the supplied-`word_source` numbers, the model "
-      "learned the algorithm but not to emit a usable `_WORDS`; if they're close, the hardcoding "
-      "took. Record the winning numbers in `GAP_ANALYSIS.md` as the tuned column of EVAL 2.\n\n"
-      "To also run EVAL 1 (English clean-room) or the Extra Spanish eval, reuse "
-      "`english_palette`/`spanish_palette` + `score_one` with the clean-room fleet prompt the same way."),
+ (MD, "## Next — hand the zip to Claude\n"
+      "Download `slm_gen.zip` and give it to Claude. It will, for every `progs/*.py`:\n\n"
+      "1. run it **self-contained** — `generate_crossword(\"vocabulary\", word_source=None, "
+      "size=<from filename/specs>)` so the program must fill from its own baked `_WORDS`;\n"
+      "2. validate the returned crossword with the standalone checker (exactly `size×size`, all "
+      "runs ≥ 3, declared entries == actual runs, single connected white region, **every entry a "
+      "real dictionary word**);\n"
+      "3. report valid% / dict% / crossings / density by size — the same gauge run on the 36 "
+      "hardcoded dataset programs (36/36).\n\n"
+      "Programs that emitted no `_WORDS` (or expect a supplied `word_source`) will fail when run "
+      "with `word_source=None` — that's the signal that the hardcoding didn't take for that sample."),
 ]
 
 
