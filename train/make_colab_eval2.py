@@ -106,22 +106,33 @@ cells = [
  (MD, "## 5. Generation settings + batched helper\n"
       "`GEN_TEMP = 1.0` gives varied samples per prompt (the prompts of a given size are nearly "
       "identical, so temperature is what produces distinct programs). Set `0.0` for greedy / "
-      "deterministic (the model's single best output).\n\n"
-      "**`MAX_NEW_TOKENS` must fit the whole program + word list.** The emitted program is the "
-      "contract header + algorithm + the baked `_WORDS` (+ for 15×15, the inlined grid "
-      "templates). Measured on the dataset programs: **7×7 ~4.2k, 11×11 ~5.6k, 15×15 ~12–14k "
-      "tokens** — so the old 4096 cap would cut off every 11×11 and 15×15 mid-code. We set "
-      "**12288** so nothing the model can emit is truncated at generation.\n\n"
-      "> ⚠️ **15×15 is limited by *training*, not this cap.** The model was fine-tuned at "
-      "`max_seq_length = 8192`, so the ~12–14k-token 15×15 programs were **truncated during "
-      "training** — the model never saw a complete one and can't reliably emit one, whatever "
-      "this cap is. **7×7/9×9/11×11 (≤ ~5.6k tokens) are fully covered.** To make 15×15 work "
-      "you'd retrain at ~14k seq-len (VRAM-heavy) or shrink the 15×15 programs (fewer inlined "
-      "templates / smaller `_WORDS`) to fit under 8192."),
- (CO, 'GEN_TEMP       = 1.0      # varied samples; use 0.0 for greedy/deterministic\n'
-      'MAX_NEW_TOKENS = 12288   # fit the FULL program: header + algorithm + baked _WORDS (+ 15x15 templates)\n'
-      'BATCH          = 4       # long 15x15 generations grow the KV cache; raise to 8 on an A100\n\n'
-      'import torch\n'
+      "deterministic.\n\n"
+      "**Two things decide speed — get both right or a single batch can take >10 min:**\n\n"
+      "1. **Stop token.** `generate()` stops on the model's `generation_config.eos_token_id`, "
+      "which for a merged Qwen model often does **not** include `<|im_end|>` (the token that ends "
+      "the assistant turn). If it's missing, every sequence runs to the full `MAX_NEW_TOKENS`. "
+      "We pass the stop ids explicitly (`EOS_IDS`, includes `<|im_end|>`) so generation ends as "
+      "soon as the program is done.\n"
+      "2. **`MAX_NEW_TOKENS`.** Full programs measure **7×7 ~4.2k, 11×11 ~5.6k, 15×15 ~12–14k "
+      "tokens**. We use **8192** = the model's training seq-len (its coherent ceiling): it fits "
+      "7/9/11 completely, and a larger cap doesn't help 15×15 (below) while making every "
+      "run-to-cap sequence slower.\n\n"
+      "> ⚠️ **15×15 is limited by *training*.** The model was fine-tuned at `max_seq_length = "
+      "8192`, so the ~12–14k-token 15×15 programs were truncated in training — it never saw a "
+      "complete one and can't emit one, so its 15×15 samples **run to the cap and will fail the "
+      "gauge**. **7×7/9×9/11×11 are fully covered — and are the default `SIZES` below** (15×15 is "
+      "skipped). Add `15` back only after retraining at a longer seq-len."),
+ (CO, 'GEN_TEMP       = 1.0     # varied samples; use 0.0 for greedy/deterministic\n'
+      'MAX_NEW_TOKENS = 8192    # model training ceiling; fits 7/9/11, caps 15x15 (see note above)\n'
+      'BATCH          = 4       # long generations grow the KV cache; raise to 8 on an A100\n\n'
+      'import torch, time\n'
+      '# generate() stops on generation_config.eos_token_id, which may NOT include <|im_end|>\n'
+      '# (Qwen ends the assistant turn with it). Without it every sequence runs to the cap\n'
+      '# (minutes per batch). Pass the stop ids explicitly.\n'
+      'EOS_IDS = sorted({x for x in [tok.eos_token_id,\n'
+      '                              (tok.convert_tokens_to_ids("<|im_end|>")\n'
+      '                               if "<|im_end|>" in tok.get_vocab() else None)] if x is not None})\n'
+      'print("stop token ids:", EOS_IDS)\n\n'
       '@torch.no_grad()\n'
       'def generate_batch(pairs):\n'
       '    """pairs: list of (system, user) -> list of completion strings (assistant turn only)."""\n'
@@ -134,23 +145,50 @@ cells = [
       '                 for (s, u) in chunk]\n'
       '        enc = tok(texts, return_tensors="pt", padding=True, truncation=True,\n'
       '                  max_length=2048).to(model.device)\n'
+      '        t = time.time()\n'
       '        gen = model.generate(**enc, max_new_tokens=MAX_NEW_TOKENS,\n'
       '                             do_sample=GEN_TEMP > 0, temperature=max(GEN_TEMP, 1e-5),\n'
-      '                             top_p=0.95, pad_token_id=tok.pad_token_id)\n'
+      '                             top_p=0.95, pad_token_id=tok.pad_token_id, eos_token_id=EOS_IDS)\n'
       '        new = gen[:, enc["input_ids"].shape[1]:]\n'
+      '        dt = time.time() - t\n'
       '        outs.extend(tok.batch_decode(new, skip_special_tokens=True))\n'
-      '        print(f"  generated {min(i + BATCH, len(pairs))}/{len(pairs)}", flush=True)\n'
+      '        print(f"  {min(i + BATCH, len(pairs))}/{len(pairs)}  "\n'
+      '              f"[{dt:.0f}s  {new.shape[1]} tok/seq  {new.numel()/max(dt,1e-9):.0f} tok/s]", flush=True)\n'
       '    return outs'),
 
+ (MD, "## 5b. Smoke test — confirm generation STOPS early (run this before the full cell)\n"
+      "One short generation on a 7×7 prompt. If `stopped_early` is **False**, generation is "
+      "running to the cap (the `<|im_end|>` stop isn't taking) and the full run will crawl — fix "
+      "that before continuing. Also prints tok/s so you can estimate the full run."),
+ (CO, 'import time, torch\n'
+      'from pipeline.eval_opus_evalset import load_prompts\n'
+      '_s, _u, _sz = load_prompts("data/sft/eval.jsonl", [7], 1)[0]\n'
+      '_txt = tok.apply_chat_template([{"role": "system", "content": _s}, {"role": "user", "content": _u}],\n'
+      '                               tokenize=False, add_generation_prompt=True)\n'
+      '_enc = tok(_txt, return_tensors="pt").to(model.device)\n'
+      '_t = time.time()\n'
+      'with torch.no_grad():\n'
+      '    _g = model.generate(**_enc, max_new_tokens=MAX_NEW_TOKENS, do_sample=GEN_TEMP > 0,\n'
+      '                        temperature=max(GEN_TEMP, 1e-5), top_p=0.95,\n'
+      '                        pad_token_id=tok.pad_token_id, eos_token_id=EOS_IDS)\n'
+      '_n = _g.shape[1] - _enc["input_ids"].shape[1]; _dt = time.time() - _t\n'
+      '_stopped = _n < MAX_NEW_TOKENS\n'
+      'print(f"smoke: size {_sz} -> {_n} new tokens in {_dt:.1f}s ({_n/max(_dt,1e-9):.0f} tok/s) | stopped_early={_stopped}")\n'
+      'if not _stopped:\n'
+      '    print("\\nWARNING: did NOT stop at <|im_end|> -> the full run will be very slow.")\n'
+      '    print("Fix: check EOS_IDS above (must include the <|im_end|> id), or lower MAX_NEW_TOKENS.")\n'
+      'else:\n'
+      '    print("OK: generation stops on its own. 7/9/11 are quick; 15x15 runs to the cap (slower).")'),
+
  (MD, "## 6. Generate on the bare `eval.jsonl` prompts, then SAVE programs + specs\n"
-      "Sizes 7/9/11/15, `PER_SIZE` prompts each. For each prompt we save the extracted program "
+      "Sizes 7/9/11 (15×15 skipped — training-capped), `PER_SIZE` prompts each. For each prompt we save the extracted program "
       "to `progs/prog_<i>_s<NN>.py` (the size is in the filename so it can be run at the right "
       "size later), the raw completion to `raw/`, and one row per prompt to `specs.jsonl` "
       "(`idx, size, prog_file, parsed, system, user`). **No scoring** — that's done locally."),
  (CO, 'import os, json\n'
       'from pipeline.eval_opus_evalset import load_prompts\n'
       'from pipeline.eval_harness import extract_code\n\n'
-      'SIZES = [7, 9, 11, 15]; PER_SIZE = 25\n'
+      'SIZES = [7, 9, 11]; PER_SIZE = 25   # 15x15 skipped: training-capped at 8192, would fail the gauge\n'
       'prompts = load_prompts("data/sft/eval.jsonl", SIZES, PER_SIZE)   # (system, user, size), BARE\n'
       'print(f"{len(prompts)} bare prompts")\n'
       'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n\n'
