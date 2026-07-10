@@ -80,7 +80,11 @@ cells = [
  (MD, "## 4. Load the tuned model\n"
       "First it **repairs shard filenames** if needed: some browsers append a `-NNN` dedup "
       "suffix on download (e.g. `model-00001-of-00002-002.safetensors`), which no longer matches "
-      "`model.safetensors.index.json` and makes `from_pretrained` fail. This renames them back."),
+      "`model.safetensors.index.json` and makes `from_pretrained` fail. This renames them back.\n\n"
+      "**Load with `attn_implementation=\"sdpa\"` and `.to(\"cuda\")`, *not* `device_map=\"auto\"`.** "
+      "Eager attention + accelerate's dispatch hooks make even an A100 crawl (~18 tok/s); SDPA "
+      "on-device runs ~60+ tok/s. The 8 GB fp16 model fits on any single target GPU, so there's "
+      "no need for `device_map`."),
  (CO, 'import os, re, json\n'
       '# --- repair browser-suffixed shard names so they match the index (idempotent) ---\n'
       '_idx = os.path.join(MODEL_DIR, "model.safetensors.index.json")\n'
@@ -99,9 +103,13 @@ cells = [
       'if tok.pad_token_id is None:\n'
       '    tok.pad_token = tok.eos_token\n'
       'tok.padding_side = "left"   # left-pad so batched generation aligns at the prompt end\n'
-      'model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype="auto", device_map="auto")\n'
+      '# SDPA + on-device (NOT device_map="auto"): eager attention + accelerate dispatch hooks\n'
+      '# make an A100 crawl at ~18 tok/s; SDPA on-device gives ~60+.\n'
+      'model = AutoModelForCausalLM.from_pretrained(\n'
+      '    MODEL_DIR, torch_dtype=torch.float16, attn_implementation="sdpa").to("cuda")\n'
       'model.eval()\n'
-      'print("loaded:", model.config.model_type, "| dtype", next(model.parameters()).dtype, "| device", model.device)'),
+      'print("loaded:", model.config.model_type, "| attn", model.config._attn_implementation,\n'
+      '      "| dtype", next(model.parameters()).dtype, "| device", model.device)'),
 
  (MD, "## 5. Generation settings + batched helper\n"
       "`GEN_TEMP = 1.0` gives varied samples per prompt (the prompts of a given size are nearly "
@@ -116,16 +124,18 @@ cells = [
       "2. **`MAX_NEW_TOKENS`.** Full programs measure **7×7 ~4.2k, 11×11 ~5.6k, 15×15 ~12–14k "
       "tokens**. We use **8192** = the model's training seq-len (its coherent ceiling): it fits "
       "7/9/11 completely, and a larger cap doesn't help 15×15 (below) while making every "
-      "run-to-cap sequence slower.\n\n"
+      "run-to-cap sequence slower. `BATCH` is auto-tuned to the GPU (8 on an A100, 4 elsewhere).\n\n"
       "> ⚠️ **15×15 is limited by *training*.** The model was fine-tuned at `max_seq_length = "
       "8192`, so the ~12–14k-token 15×15 programs were truncated in training — it never saw a "
       "complete one and can't emit one, so its 15×15 samples **run to the cap and will fail the "
       "gauge**. **7×7/9×9/11×11 are fully covered — and are the default `SIZES` below** (15×15 is "
       "skipped). Add `15` back only after retraining at a longer seq-len."),
  (CO, 'GEN_TEMP       = 1.0     # varied samples; use 0.0 for greedy/deterministic\n'
-      'MAX_NEW_TOKENS = 8192    # model training ceiling; fits 7/9/11, caps 15x15 (see note above)\n'
-      'BATCH          = 4       # long generations grow the KV cache; raise to 8 on an A100\n\n'
+      'MAX_NEW_TOKENS = 8192    # model training ceiling; fits 7/9/11, caps 15x15 (see note above)\n\n'
       'import torch, time\n'
+      '_vram = torch.cuda.get_device_properties(0).total_memory / 1e9\n'
+      'BATCH = 8 if _vram >= 38 else 4    # A100-40GB -> 8; L4/T4 -> 4 (drop to 2 on a T4 if you OOM)\n'
+      'print(f"VRAM ~{_vram:.0f}GB -> BATCH={BATCH}")\n'
       '# generate() stops on generation_config.eos_token_id, which may NOT include <|im_end|>\n'
       '# (Qwen ends the assistant turn with it). Without it every sequence runs to the cap\n'
       '# (minutes per batch). Pass the stop ids explicitly.\n'
@@ -188,7 +198,7 @@ cells = [
  (CO, 'import os, json\n'
       'from pipeline.eval_opus_evalset import load_prompts\n'
       'from pipeline.eval_harness import extract_code\n\n'
-      'SIZES = [7, 9, 11]; PER_SIZE = 25   # 15x15 skipped: training-capped at 8192, would fail the gauge\n'
+      'SIZES = [7, 9, 11]; PER_SIZE = 10   # 15x15 skipped (training-capped); raise PER_SIZE to 25 for a tighter estimate\n'
       'prompts = load_prompts("data/sft/eval.jsonl", SIZES, PER_SIZE)   # (system, user, size), BARE\n'
       'print(f"{len(prompts)} bare prompts")\n'
       'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n\n'
