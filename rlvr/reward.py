@@ -212,6 +212,47 @@ def reward_from_text(text: str, size: int, palette: dict, cfg: RewardConfig) -> 
     return reward, bd
 
 
+def evaluate_text(text: str, size: int, palette: dict, cfg: RewardConfig) -> dict:
+    """Score one completion for EVAL. Returns the reward AND the underlying verifier
+    metrics (valid, vocab_fraction, crossings, invalid_*, density, black squares,
+    n_entries, memorized) as a flat record for aggregation. Same scoring path as the
+    training reward, so eval numbers are comparable to what GRPO optimized."""
+    zero = {"reward": 0.0, "size": int(size), "ran": 0, "valid": 0, "vocab_fraction": 0.0,
+            "crossings": 0, "n_entries": 0, "invalid_crossing_frac": 0.0,
+            "invalid_entry_frac": 0.0, "fill_density": 0.0, "black_squares": None,
+            "black_target": None, "memorized": 0, "status": "no_code"}
+    code = extract_code(text)
+    if not code:
+        return zero
+    eff = canonical_eff(size, cfg)
+    runA = _run(code, size, [], cfg)
+    if runA.get("status") != "ok":
+        zero.update({"reward": cfg.floor_no_run, "status": f"own_run:{runA.get('status')}"})
+        return zero
+    m = _score_layout(runA["result"], eff, [], runA.get("runtime_s"))
+    reward, _ = compute_reward(m, eff, cfg)
+    runB = _run(code, size, palette["word_source"], cfg)
+    memorized = runB.get("status") == "ok" and _answers(runB["result"]) == _answers(runA["result"])
+    if memorized:
+        reward *= cfg.memo_penalty
+
+    n = int(size) * int(size)
+    white = round(_num(m, "fill_density") * n)
+    black_target = int(round(n * (1.0 - eff["density_target"])))
+    return {
+        "reward": round(reward, 4), "size": int(size), "ran": 1, "status": "ok",
+        "valid": int(_num(m, "valid") >= 0.999),
+        "vocab_fraction": round(1.0 - _num(m, "filler_fraction"), 4),
+        "crossings": int(_num(m, "crossings")),
+        "n_entries": int(_num(m, "n_entries")),
+        "invalid_crossing_frac": round(_num(m, "invalid_crossing_frac"), 4),
+        "invalid_entry_frac": round(_num(m, "invalid_entry_frac"), 4),
+        "fill_density": round(_num(m, "fill_density"), 4),
+        "black_squares": n - white, "black_target": black_target,
+        "memorized": int(memorized),
+    }
+
+
 def _completion_text(completion) -> str:
     if isinstance(completion, str):
         return completion
