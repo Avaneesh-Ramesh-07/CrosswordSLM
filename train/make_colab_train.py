@@ -2,7 +2,7 @@
 
 Adapted from the standard Llama-2 QLoRA SFT notebook (training_example.ipynb), but:
   * base model = Qwen3-4B-Instruct (not Llama-2), modern transformers/trl/peft
-  * dataset = our chat JSONL (data/sft/{train,dev,eval}.jsonl), size-upsampled
+  * dataset = enhanced non-hardcoded chat JSONL (data/sft_non_hardcoded_enhanced/), size-routed recipe
   * RESPONSE-ONLY loss (mask system+user; train only on the assistant program)
   * dev split used for in-training validation; eval split left untouched
   * save LoRA + merged fp16 model; points to colab_eval_tuned.ipynb for base-vs-tuned eval
@@ -20,9 +20,11 @@ REPO_URL = "https://github.com/Avaneesh-Ramesh-07/CrosswordSLM.git"
 cells = [
  (MD, "# QLoRA fine-tune: Qwen3-4B → crossword-generator SLM\n\n"
       "Distills the (Claude + verifier + scaffolding) pipeline into one-shot generation. "
-      "Trains on `data/sft/train.jsonl` (chat: fixed system contract → minimal size-routed "
-      "user prompt → verified assistant program), **response-only loss**, dev for validation, "
-      "`eval` held out for the base-vs-tuned test (see `colab_eval_tuned.ipynb`)."),
+      "Trains on the enhanced non-hardcoded dataset (`data/sft_non_hardcoded_enhanced/`; chat: fixed "
+      "system contract → size-specific `NxN` user prompt → verified assistant program, each carrying "
+      "only its own size's template under a one-line technique header), **response-only loss**, dev "
+      "for validation, `eval` held out for "
+      "the base-vs-tuned test (see `colab_eval_tuned.ipynb`)."),
 
  (MD, "## 1. Install (pinned, Qwen3-capable snapshot)\n"
       "Versions are **pinned**, not `>=`, on purpose: the current `trl` (1.x) **removed** "
@@ -72,37 +74,37 @@ cells = [
       '    print(f"OK -- {total_gb:.0f} GB fits 4-bit Qwen3-4B QLoRA (can raise seq-len toward 8192).")'),
 
  (MD, "## 2. Get the data\n"
-      "**Do ONE of these** (the notebook will not invent data):\n"
-      "- **Clone your repo:** set `REPO_URL` below to your GitHub repo. The committed "
-      "`data/sft/{train,dev}.jsonl` splits are used as-is.\n"
-      "- **Upload:** put `train.jsonl`/`dev.jsonl` in a Colab folder and set `DATA_DIR` "
-      "to it (leave `REPO_URL` as the placeholder).\n\n"
-      "The raw per-run outputs (`runs/`) are gitignored, so a fresh clone has none; the "
-      "committed splits are already merged + upsampled, so we use them directly and only "
-      "rebuild when `runs/` is present -- we never clobber the committed data with empties."),
+      "Uses the **enhanced non-hardcoded** dataset `data/sft_non_hardcoded_enhanced/` "
+      "(reliable positives `train/dev/eval.jsonl` + the `works_too_long.jsonl` subsection).\n"
+      "- **Clone your repo:** set `REPO_URL` below. **Commit `data/sft_non_hardcoded_enhanced/` "
+      "first** — it's under `data/` so it's tracked (unlike gitignored `runs/`).\n"
+      "- **Upload:** put those `.jsonl` files in a Colab folder and set `DATA_DIR` to it.\n\n"
+      "Cell 5 assembles the training corpus from these files **in memory** — 7/9/11 only "
+      "(15×15 excluded, too long). The `works_too_long` supplements at 9/11 are **filtered to the "
+      "≥2/3-reliable programs** (`wtl_keep.json`: each kept program produces a valid N×N grid in ≥2/3 "
+      "of runs); 9×9 is topped up with those (all available), 11×11 gets all of them. The 7×7 "
+      "`works_too_long` (never trained) supplies the held-out dev set — **files on disk are never modified**."),
  (CO, f'REPO_URL = "{REPO_URL}"   # <-- REQUIRED unless you set DATA_DIR to an upload\n'
       'DATA_DIR = None            # <-- set to an uploaded folder to skip the clone\n'
-      'HARDCODED_WORDS = True     # True: train on data/sft_hardcoded_words (per-program baked-in words); False: baseline data/sft\n'
       'import os\n\n'
       'if DATA_DIR is None:\n'
       '    assert "<REPO>" not in REPO_URL, (\n'
-      '        "Set REPO_URL to your repo, OR set DATA_DIR to a folder containing "\n'
-      '        "train.jsonl/dev.jsonl that you uploaded via the Files panel."\n'
+      '        "Set REPO_URL to your repo, OR set DATA_DIR to a folder with the enhanced dataset "\n'
+      '        "(train/dev/eval.jsonl + works_too_long.jsonl) uploaded via the Files panel."\n'
       '    )\n'
       '    if not os.path.exists("slm"):\n'
       '        !git clone -q $REPO_URL slm\n'
-      '    DATA_DIR = "slm/data/sft_hardcoded_words" if HARDCODED_WORDS else "slm/data/sft"\n'
-      '    # committed splits are already merged+upsampled; only rebuild if the\n'
-      '    # (gitignored) raw per-run outputs are present -- never clobber with empties.\n'
-      '    if not HARDCODED_WORDS and os.path.exists("slm/runs"):\n'
-      '        !cd slm && python pipeline/merge_dataset.py --upsample 11=3,15=3\n\n'
-      'for _f in ("train.jsonl", "dev.jsonl"):\n'
-      '    assert os.path.exists(f"{DATA_DIR}/{_f}"), f"missing {_f} in {DATA_DIR}"\n'
+      '    # Non-hardcoded ENHANCED dataset (purified-palette validated, topic=vocabulary).\n'
+      '    # The training corpus is assembled from these files in cell 5 (files not modified).\n'
+      '    DATA_DIR = "slm/data/sft_non_hardcoded_enhanced"\n\n'
+      'for _f in ("train.jsonl", "works_too_long.jsonl", "wtl_keep.json"):\n'
+      '    assert os.path.exists(f"{DATA_DIR}/{_f}"), (\n'
+      '        f"missing {_f} in {DATA_DIR} -- commit data/sft_non_hardcoded_enhanced/ to the repo first")\n'
       'print("data dir:", DATA_DIR, os.listdir(DATA_DIR))'),
 
  (MD, "## 3. Config\n"
       "Hyperparameters. **The per-device batch is auto-tuned to the GPU** detected in cell 1b: "
-      "the *effective* batch stays ~16 (the right convergence target for ~1.9k rows) while the "
+      "the *effective* batch stays ~16 (the right convergence target for ~1.7k rows) while the "
       "*per-device* batch scales with VRAM **and** sequence length. Gradient checkpointing stays "
       "**on** (needed at these seq-lens). Wall-clock is set by rows×epochs×seq-len, not batch "
       "size — a bigger per-device batch just improves GPU utilization."),
@@ -115,14 +117,19 @@ cells = [
       'lora_r, lora_alpha, lora_dropout = 32, 64, 0.05\n'
       '# Qwen attention + MLP projections\n'
       'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
-      '# Real max tokens (Qwen tokenizer): 7/9 ~4.1k, 11x11 ~8.9k. 15x15 (~28.7k tok, dominated\n'
-      '# by 47 inlined templates) were DROPPED from the dataset -- too long to learn as verbatim\n'
-      '# targets. 10240 fits 7/9/11 with margin; verified by the token-length preflight below.\n'
-      'max_seq_length = 10240\n\n'
-      'num_train_epochs = 3   # more epochs to memorize the verbatim _WORDS lists (was 1); raise to 5-8 if still not learned\n\n'
+      '# Real max tokens (Qwen tokenizer) for the 7/9/11 corpus: ~7k, AFTER template specialization +\n'
+      '# header condensation -- each program now carries ONLY its own size template (not all of 7/9/11)\n'
+      '# under a one-line docstring, so rows are ~half their old size. 15x15 is EXCLUDED from training.\n'
+      '# 12288 leaves wide margin (0 truncation;\n'
+      '# verified by the token-length preflight below).\n'
+      '# NOTE: since the max row is now ~7k tok, 8192 also fits and would enable ~2x per-device batch\n'
+      '# (see the seq-len branch below) for faster training -- lower it if the preflight still shows 0\n'
+      '# truncation on your data.\n'
+      'max_seq_length = 12288\n\n'
+      'num_train_epochs = 3   # learn the reliable generation algorithms (raise to 5-8 if under-fit)\n\n'
       '# ---- throughput config: auto-tuned to the GPU detected in cell 1b ----\n'
       '# Wall-clock is set by rows x epochs x seq-len, NOT batch size. We hold the\n'
-      '# EFFECTIVE batch at ~16 (right convergence target for ~2.1k rows) and scale the\n'
+      '# EFFECTIVE batch at ~16 (right convergence target for ~1.7k rows) and scale the\n'
       '# PER-DEVICE batch with VRAM (better GPU utilization; no effect on the optimizer).\n'
       '# Gradient checkpointing stays ON on every GPU: at seq-len 4096 a 4B model OOMs\n'
       '# WITHOUT it even on a 40GB A100 (measured) -- batch>=2 activations exceed 40GB, and\n'
@@ -172,7 +179,7 @@ cells = [
       'model = AutoModelForCausalLM.from_pretrained(\n'
       '    model_name, quantization_config=bnb_config, device_map={"": 0},\n'
       '    torch_dtype=compute_dtype, trust_remote_code=True,\n'
-      '    attn_implementation="sdpa",   # O(seq) attention memory -> long 11x11 seqs (~9k tok) fit\n'
+      '    attn_implementation="sdpa",   # O(seq) attention memory -> long 11x11 seqs (~7k tok) fit\n'
       ')\n'
       'model.config.use_cache = False\n'
       'model = prepare_model_for_kbit_training(\n'
@@ -190,20 +197,47 @@ cells = [
       "Each row is `{messages:[system,user,assistant]}`. We render it with the model's own "
       "chat template into a `text` field; the response-only collator (next cell) then masks "
       "everything up to the assistant turn so loss is computed **only on the program**."),
- (CO, 'import json\n'
+ (CO, 'import json, random, collections\n'
       'from datasets import Dataset, DatasetDict\n\n'
-      '# Load ONLY the `messages` column. The per-row `meta` is curation-only and has an\n'
-      '# INCONSISTENT schema across sources (template rows add meta.engine/selection/subset\n'
-      '# + effective_spec.approach; effective_spec.time_budget_s is mixed int/float), so\n'
-      '# load_dataset("json", ...) fails inferring one Arrow struct for meta. messages is\n'
-      '# uniform (list of {role,content} strings), so we drop meta entirely.\n'
-      'def _load_split(path):\n'
-      '    rows = [{"messages": json.loads(l)["messages"]}\n'
-      '            for l in open(path, encoding="utf-8") if l.strip()]\n'
-      '    return Dataset.from_list(rows)\n\n'
+      '# Assemble the training corpus from the enhanced dataset WITHOUT modifying the files.\n'
+      '# 7/9/11 only (15x15 excluded -- its programs are ~27k tokens). Composition:\n'
+      '#   7x7   = all reliable positives\n'
+      '#   9x9   = positives + >=2/3-reliable works_too_long (all available; may not reach the 7x7 count)\n'
+      '#   11x11 = positives + ALL >=2/3-reliable works_too_long\n'
+      '# works_too_long = correct-but-flaky generators; the 9/11 supplements are FILTERED to programs\n'
+      '# that produced a valid NxN grid in >=2/3 of runs (wtl_keep.json), so we do not train on the\n'
+      '# ones that mostly empty out. The 7x7 works_too_long (never trained) supplies held-out dev.\n'
+      'SIZES = (7, 9, 11)\n'
+      'def _load(path):\n'
+      '    out = []\n'
+      '    for l in open(path, encoding="utf-8"):\n'
+      '        if not l.strip():\n'
+      '            continue\n'
+      '        r = json.loads(l); m = r["meta"]; sz = m["effective_spec"]["size"]\n'
+      '        if sz in SIZES:\n'
+      '            out.append({"messages": r["messages"], "size": sz, "hash": m.get("program_hash")})\n'
+      '    return out\n\n'
+      'pos = _load(f"{DATA_DIR}/train.jsonl") + _load(f"{DATA_DIR}/dev.jsonl") + _load(f"{DATA_DIR}/eval.jsonl")\n'
+      'wtl = _load(f"{DATA_DIR}/works_too_long.jsonl")\n'
+      'byw = {s: [r for r in wtl if r["size"] == s] for s in SIZES}\n'
+      '# keep only the >=2/3-reliable (program,size) works_too_long pairs for TRAINING (sizes 9/11)\n'
+      '_keep = {(h, s) for h, s in json.load(open(f"{DATA_DIR}/wtl_keep.json"))["keep"]}\n'
+      'w9raw  = [r for r in byw[9]  if (r["hash"], 9)  in _keep]\n'
+      'w11    = [r for r in byw[11] if (r["hash"], 11) in _keep]\n'
+      'n7  = sum(1 for r in pos if r["size"] == 7)\n'
+      'n9p = sum(1 for r in pos if r["size"] == 9)\n'
+      'rng = random.Random(0); w9 = w9raw[:]; rng.shuffle(w9)\n'
+      'need9 = max(0, n7 - n9p)                       # top up 9x9 toward the 7x7 count (capped by availability)\n'
+      'train_rows = list(pos) + w11 + w9[:need9]      # 7: positives; 11: +all filtered wtl; 9: +filtered wtl\n'
+      'rng.shuffle(train_rows)\n'
+      '# clean held-out dev (NOT in train): the 7x7 works_too_long (unfiltered) + any leftover 9x9 supplements\n'
+      'unused = byw[7] + w9[need9:]; rng.shuffle(unused)\n'
+      'dev_rows = unused[:64]\n'
+      'print("TRAIN by size:", dict(sorted(collections.Counter(r["size"] for r in train_rows).items())), "| total", len(train_rows))\n'
+      'print("DEV   by size:", dict(sorted(collections.Counter(r["size"] for r in dev_rows).items())), "| total", len(dev_rows))\n\n'
       'ds = DatasetDict({\n'
-      '    "train": _load_split(f"{DATA_DIR}/train.jsonl"),\n'
-      '    "dev":   _load_split(f"{DATA_DIR}/dev.jsonl"),\n'
+      '    "train": Dataset.from_list(train_rows),\n'
+      '    "dev":   Dataset.from_list(dev_rows),\n'
       '})\n\n'
       'def render(row):\n'
       '    # add_generation_prompt=False -> include the assistant turn as the target\n'
