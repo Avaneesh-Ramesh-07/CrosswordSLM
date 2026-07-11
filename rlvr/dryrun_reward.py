@@ -93,7 +93,7 @@ def memorization_test(palette, cfg):
                f"    return {layout!r}\n")
     r_lit, bd = reward_from_text(literal, TEST_SIZE, palette, cfg)
     eff = canonical_eff(TEST_SIZE, cfg)
-    raw = compute_reward(_score_layout(layout, eff, [], run.get("runtime_s"), palette), eff, cfg)[0]
+    raw = compute_reward(_score_layout(layout, eff, [], run.get("runtime_s")), eff, cfg)[0]
     penalized = bd.get("memorized") is True and r_lit < raw - 1e-9
     print(f"  literal-returner: reward={r_lit:.3f} (un-penalized would be {raw:.3f}), "
           f"memorized={bd.get('memorized')}")
@@ -107,8 +107,9 @@ def main():
     args = ap.parse_args()
     cfg = RewardConfig()
     palette = get_palette()
-    print(f"palette: {len(palette['targets'])} targets, {len(palette['vocab_set'])} vocab; "
-          f"test size={TEST_SIZE}\n")
+    from rlvr.reward import get_vocab_set
+    print(f"palette: {len(palette['targets'])} targets | educational vocab (purified): "
+          f"{len(get_vocab_set())} | test size={TEST_SIZE}\n")
 
     good = _score_bucket("GOOD (hardcoded-words solutions)", good_samples(args.n), palette, cfg)
     degen = _score_bucket("DEGENERATE (synthetic)", DEGENERATE, palette, cfg)

@@ -64,7 +64,8 @@ if not os.path.exists("/content/slm"):
     !git clone -q $REPO_URL /content/slm
 os.chdir("/content/slm")
 sys.path.insert(0, "/content/slm")   # so `import rlvr.reward` / harness / pipeline resolve
-for _p in ("rlvr", "harness", "pipeline", "data/sft_hardcoded_words", "data/wordlists/words_alpha.txt"):
+for _p in ("rlvr", "harness", "pipeline", "data/sft_hardcoded_words",
+           "data/wordlists/words_alpha.txt", "data/wordlists/WORD_LIST_FULLY_PURIFIED.txt"):
     assert os.path.exists(_p), f"missing {_p} -- push rlvr/ + data to the repo"
 
 from google.colab import drive
@@ -88,7 +89,7 @@ BASE_MODEL   = "Qwen/Qwen3-4B-Instruct-2507"   # fallback base; cell 4 reads the
 GRPO_OUT     = "qwen3-4b-crossword-grpo"        # output: the continued (GRPO-refined) LoRA adapter dir
 LOAD_4BIT    = True                             # 4-bit QLoRA policy (set False on A100 for cleaner vLLM sync)
 USE_VLLM     = True                             # colocated fast rollouts; fallback below if it errors
-SIZES        = (7,) if SMOKE else (7, 9)        # 11/15 use slow template fills (~35s x2 per rollout)
+SIZES        = (7,) if SMOKE else (7, 9, 11)    # 15 excluded: ~21s fills + palette lacks len>11 words
 
 from rlvr.reward import RewardConfig
 # require_symmetry=False to start (symmetry makes `valid` sparse); anneal to True later.
@@ -156,10 +157,10 @@ policy.print_trainable_parameters()'''),
       "distribution) — `n_repeats` just adds optimizer steps; real variety comes from "
       "`num_generations`/`temperature`. The reward warms a palette + the 370k-word dictionary "
       "and runs untrusted model code sandboxed."),
- (CO, r'''from rlvr.reward import make_reward_fn, get_palette, get_dictionary
+ (CO, r'''from rlvr.reward import make_reward_fn, get_palette, get_dictionary, get_vocab_set
 from rlvr.prompts import build_grpo_dataset
 
-get_palette(); get_dictionary()   # warm caches once (needs wordfreq + data/wordlists/)
+get_palette(); get_dictionary(); get_vocab_set()   # warm caches (wordfreq + data/wordlists/)
 reward_fn = make_reward_fn(reward_cfg)
 
 n_repeats = 2 if SMOKE else 20

@@ -11,7 +11,7 @@ sampled programs.
 
 | file | role |
 |---|---|
-| `reward.py` | verifiable reward. Runs the program **twice** — once with its own `_WORDS` (graded), once with an injected palette (memorization check) — and requires the two grids to differ. Validates self-chosen words against `data/wordlists/words_alpha.txt`; educational quality = `vocab_fraction` vs the palette. Composite = binary gates + graded shaping. |
+| `reward.py` | verifiable reward. Runs the program **twice** — once with its own `_WORDS` (graded), once with an injected palette (memorization check) — and requires the two grids to differ. Validates self-chosen words against `data/wordlists/words_alpha.txt` (real word); educational quality = `vocab_fraction` vs `data/wordlists/WORD_LIST_FULLY_PURIFIED.txt` (curated vocab). Composite = binary gates + graded shaping. |
 | `prompts.py` | GRPO prompt set: the ~5-per-size unique prompts (sizes 7/9/11/15) from `data/sft_hardcoded_words/train.jsonl`, each with a flat `size` column. |
 | `dryrun_reward.py` | Phase-A local proof (no GPU): GOOD ≫ DEGENERATE ≫ non-parseable, + the memorization test. |
 | `make_colab_grpo.py` → `colab_grpo.ipynb` | GRPO trainer notebook. Continues the SFT LoRA as the trainable policy; TRL `GRPOTrainer` + vLLM. |

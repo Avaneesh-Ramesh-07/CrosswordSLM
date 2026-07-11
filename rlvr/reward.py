@@ -10,7 +10,8 @@ its OWN embedded word list and returns a layout dict. So the reward:
      insensitive to word_source (same grid both runs) -> memorization penalty.
 
 Words are self-chosen, so "real word" is validated against a broad English dictionary
-(data/wordlists/words_alpha.txt); educational quality is `vocab_fraction` vs the palette.
+(data/wordlists/words_alpha.txt); educational quality is `vocab_fraction` vs the curated
+purified vocabulary list (data/wordlists/WORD_LIST_FULLY_PURIFIED.txt).
 No coverage term (there is no injected target vocabulary). All execution is sandboxed
 (untrusted model code). Reward = (1-bw)*graded + bw*binary, then * memo_penalty if the
 program failed the distinctness check.
@@ -33,6 +34,9 @@ from pipeline.eval_harness import build_palette, extract_code
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DICT_PATH = os.path.join(_ROOT, "data", "wordlists", "words_alpha.txt")
+# "Educational vocab" reference for vocab_fraction: the curated purified word list
+# (NOT the derived build_clean_education_source intersection).
+_VOCAB_LIST_PATH = os.path.join(_ROOT, "data", "wordlists", "WORD_LIST_FULLY_PURIFIED.txt")
 
 # Per-size constraints (density from spec_generator's NYT-shaped targets) and sandbox
 # timeouts (the hardcoded generator has an internal ~21s deadline at size 15).
@@ -69,6 +73,13 @@ def get_dictionary() -> frozenset:
     """Broad English dictionary for the real-word check (model self-sources words)."""
     with open(_DICT_PATH, encoding="utf-8") as fh:
         return frozenset(w.strip().upper() for w in fh if w.strip())
+
+
+@lru_cache(maxsize=1)
+def get_vocab_set() -> frozenset:
+    """Educational-vocab reference for vocab_fraction: the curated WORD_LIST_FULLY_PURIFIED."""
+    with open(_VOCAB_LIST_PATH, encoding="utf-8") as fh:
+        return frozenset(w.strip().upper() for w in fh if w.strip() and w.strip().isalpha())
 
 
 def canonical_eff(size: int, cfg: RewardConfig) -> dict:
@@ -157,10 +168,11 @@ def _run(code: str, size: int, word_source, cfg: RewardConfig) -> dict:
     )
 
 
-def _score_layout(layout, eff: dict, scorer_word_source, runtime_s, palette: dict) -> dict:
+def _score_layout(layout, eff: dict, scorer_word_source, runtime_s) -> dict:
+    # real-word check vs the broad dictionary; educational-vocab % vs the purified list
     return score(layout, build_spec(eff), word_source=scorer_word_source,
                  dictionary=get_dictionary(), runtime_s=runtime_s,
-                 vocab_set=palette["vocab_set"])
+                 vocab_set=get_vocab_set())
 
 
 def _answers(layout) -> frozenset:
@@ -187,7 +199,7 @@ def reward_from_text(text: str, size: int, palette: dict, cfg: RewardConfig) -> 
     runA = _run(code, size, [], cfg)
     if runA.get("status") != "ok":
         return cfg.floor_no_run, {"reward": cfg.floor_no_run, "reason": f"own_run:{runA.get('status')}"}
-    metricsA = _score_layout(runA["result"], eff, [], runA.get("runtime_s"), palette)
+    metricsA = _score_layout(runA["result"], eff, [], runA.get("runtime_s"))
     reward, bd = compute_reward(metricsA, eff, cfg)
 
     # 2) memorization check: run with an injected palette; a literal-returner yields the
@@ -214,7 +226,7 @@ def make_reward_fn(cfg: RewardConfig | None = None):
     Reads the flat `size` column; scores the batch concurrently (subprocess-I/O bound)."""
     cfg = cfg or RewardConfig()
     palette = get_palette()
-    get_dictionary()  # warm cache once
+    get_dictionary(); get_vocab_set()  # warm caches once
 
     def reward_fn(prompts=None, completions=None, **cols):
         texts = [_completion_text(c) for c in (completions or [])]
