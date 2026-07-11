@@ -198,7 +198,7 @@ cells = [
  (CO, 'import os, json\n'
       'from pipeline.eval_opus_evalset import load_prompts\n'
       'from pipeline.eval_harness import extract_code\n\n'
-      'SIZES = [7, 9, 11]; PER_SIZE = 10   # 15x15 skipped (training-capped); raise PER_SIZE to 25 for a tighter estimate\n'
+      'SIZES = [7, 9, 11]; PER_SIZE = 25   # 25/size matches Claude EVAL 2 (25x4=100 there); 15x15 skipped (training-capped)\n'
       'prompts = load_prompts("data/sft/eval.jsonl", SIZES, PER_SIZE)   # (system, user, size), BARE\n'
       'print(f"{len(prompts)} bare prompts")\n'
       'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n\n'

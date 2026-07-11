@@ -101,11 +101,11 @@ cells = [
       'print("data dir:", DATA_DIR, os.listdir(DATA_DIR))'),
 
  (MD, "## 3. Config\n"
-      "Hyperparameters. **Batch size + gradient checkpointing are auto-tuned to the GPU** "
-      "detected in cell 1b: the *effective* batch stays ~16 (the right convergence target for "
-      "~2.1k rows) while the *per-device* batch scales with VRAM, and checkpointing is turned "
-      "off when there's memory to spare (~28% faster). Wall-clock is set by rows×epochs×seq, "
-      "not by batch size — bigger per-device batch just improves GPU utilization."),
+      "Hyperparameters. **The per-device batch is auto-tuned to the GPU** detected in cell 1b: "
+      "the *effective* batch stays ~16 (the right convergence target for ~1.9k rows) while the "
+      "*per-device* batch scales with VRAM **and** sequence length. Gradient checkpointing stays "
+      "**on** (needed at these seq-lens). Wall-clock is set by rows×epochs×seq-len, not batch "
+      "size — a bigger per-device batch just improves GPU utilization."),
  (CO, '# Qwen3-4B instruct. Confirm the exact HF id (alts: "Qwen/Qwen3-4B",\n'
       '# "Qwen/Qwen3-4B-Instruct"). Start from Instruct for fast SFT.\n'
       'model_name  = "Qwen/Qwen3-4B-Instruct-2507"  # base model to fine-tune FROM\n'
@@ -115,11 +115,11 @@ cells = [
       'lora_r, lora_alpha, lora_dropout = 32, 64, 0.05\n'
       '# Qwen attention + MLP projections\n'
       'target_modules = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]\n\n'
-      '# programs are long (a full generator + baked _WORDS); give the sequence room.\n'
-      '# 8192 fully covers 7/9/11; 15x15 programs (~7-12k tok) are still partly truncated --\n'
-      '# raise to ~12288 for full 15x15, but that is A100-40GB-tight/OOM on QLoRA.\n'
-      'max_seq_length = 8192\n\n'
-      'num_train_epochs = 1\n\n'
+      '# Real max tokens (Qwen tokenizer): 7/9 ~4.1k, 11x11 ~8.9k. 15x15 (~28.7k tok, dominated\n'
+      '# by 47 inlined templates) were DROPPED from the dataset -- too long to learn as verbatim\n'
+      '# targets. 10240 fits 7/9/11 with margin; verified by the token-length preflight below.\n'
+      'max_seq_length = 10240\n\n'
+      'num_train_epochs = 3   # more epochs to memorize the verbatim _WORDS lists (was 1); raise to 5-8 if still not learned\n\n'
       '# ---- throughput config: auto-tuned to the GPU detected in cell 1b ----\n'
       '# Wall-clock is set by rows x epochs x seq-len, NOT batch size. We hold the\n'
       '# EFFECTIVE batch at ~16 (right convergence target for ~2.1k rows) and scale the\n'
@@ -129,11 +129,15 @@ cells = [
       '# group_by_length packs the longest sequences together, spiking peak memory.\n'
       '_vram = globals().get("total_gb", 16.0)   # from cell 1b; fallback = conservative 16GB\n'
       'gradient_checkpointing = True\n'
-      '# Base micro-batch by VRAM, then scale DOWN for long sequences: peak activations grow\n'
-      '# ~linearly with seq-len, so at 8192 we halve the 4096-era batch to stay under 40GB.\n'
-      '_base = 4 if _vram >= 38 else (2 if _vram >= 22 else 1)      # A100 40GB / L4 24GB / T4 16GB\n'
-      '_seq_factor = max(1, max_seq_length // 4096)                 # 1@4096, 2@8192, 3@12288\n'
-      'per_device_train_batch_size = max(1, _base // _seq_factor)\n'
+      '# Micro-batch by VRAM AND sequence length: peak activations grow ~linearly with seq-len,\n'
+      '# so long sequences force a smaller micro-batch. Effective batch held ~16 via accumulation.\n'
+      '# (Requires SDPA attention -- set in cell 4 -- so attention memory is O(seq), not O(seq^2).)\n'
+      'if max_seq_length <= 8192:\n'
+      '    per_device_train_batch_size = 8 if _vram >= 76 else (4 if _vram >= 38 else (2 if _vram >= 22 else 1))\n'
+      'elif max_seq_length <= 16384:\n'
+      '    per_device_train_batch_size = 4 if _vram >= 76 else (2 if _vram >= 38 else 1)\n'
+      'else:                                    # ~16k-24k seq-len (15x15 programs)\n'
+      '    per_device_train_batch_size = 2 if _vram >= 76 else 1     # A100-80GB fits 2; smaller -> 1\n'
       'gradient_accumulation_steps = max(1, round(16 / per_device_train_batch_size))  # hold effective ~16\n'
       'per_device_eval_batch_size = per_device_train_batch_size\n'
       'eff = per_device_train_batch_size * gradient_accumulation_steps\n'
@@ -168,6 +172,7 @@ cells = [
       'model = AutoModelForCausalLM.from_pretrained(\n'
       '    model_name, quantization_config=bnb_config, device_map={"": 0},\n'
       '    torch_dtype=compute_dtype, trust_remote_code=True,\n'
+      '    attn_implementation="sdpa",   # O(seq) attention memory -> long 11x11 seqs (~9k tok) fit\n'
       ')\n'
       'model.config.use_cache = False\n'
       'model = prepare_model_for_kbit_training(\n'
@@ -206,7 +211,16 @@ cells = [
       '                                                   add_generation_prompt=False)}\n\n'
       'ds = ds.map(render, remove_columns=[c for c in ds["train"].column_names if c != "text"])\n'
       'print(ds)\n'
-      'print("\\n--- one rendered example (head) ---\\n", ds["train"][0]["text"][:600])'),
+      'print("\\n--- one rendered example (head) ---\\n", ds["train"][0]["text"][:600])\n\n'
+      '# --- token-length preflight: confirm nothing gets truncated at max_seq_length ---\n'
+      '_lens = [len(tokenizer(t, add_special_tokens=False)["input_ids"]) for t in ds["train"]["text"]]\n'
+      '_mx = max(_lens); _over = sum(1 for n in _lens if n > max_seq_length)\n'
+      'print(f"\\ntoken lengths: max={_mx}  mean={sum(_lens)//len(_lens)}  rows>{max_seq_length}: {_over}")\n'
+      'if _over:\n'
+      '    print(f"WARNING: {_over} rows exceed max_seq_length={max_seq_length} and WILL be truncated")\n'
+      '    print(f"         (loss then trains on cut-off programs). Raise max_seq_length (cell 3) above {_mx}.")\n'
+      'else:\n'
+      '    print(f"OK: all {len(_lens)} rows fit (max {_mx} <= {max_seq_length}); no truncation.")'),
 
  (MD, "## 6. Response-only loss\n"
       "Qwen renders the assistant turn after `<|im_start|>assistant\\n`. Masking up to that "
@@ -246,6 +260,12 @@ cells = [
       '    metric_for_best_model="eval_loss",\n'
       '    report_to="tensorboard",\n'
       ')\n\n'
+      '# guard: confirm the trainer will actually cap at max_seq_length (trl renamed\n'
+      '# max_seq_length -> max_length; a wrong arg would silently truncate to a small default).\n'
+      '_ml, _msl = getattr(args, "max_length", None), getattr(args, "max_seq_length", None)\n'
+      'print(f"SFTConfig max length -> max_length={_ml}, max_seq_length={_msl}")\n'
+      'assert max_seq_length in (_ml, _msl), (\n'
+      '    f"neither SFTConfig max length == {max_seq_length}; arg-name mismatch would silently truncate")\n\n'
       'trainer = SFTTrainer(\n'
       '    model=model,\n'
       '    args=args,\n'
