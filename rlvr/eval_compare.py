@@ -2,7 +2,7 @@
 
 Thin wrapper over pipeline/eval_harness.py: it registers the two served adapters
 (sft, rlvr) as an OpenAI/Ollama-compatible model registry and runs the SAME eval
-used everywhere else on rlvr/dataset/eval.jsonl (never trained on). eval_harness
+used everywhere else on data/sft_hardcoded_words/eval.jsonl (never trained on). eval_harness
 prints valid_rate, within_spec_rate, pass@k, coverage, crossings, filler_fraction,
 invalid_entry/crossing_frac for both models side by side.
 
@@ -31,8 +31,14 @@ if __package__ in (None, ""):
 from pipeline.eval_harness import main as eval_main
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DEFAULT_EVAL = os.path.join(_ROOT, "rlvr", "dataset", "eval.jsonl")
+_DEFAULT_EVAL = os.path.join(_ROOT, "data", "sft_hardcoded_words", "eval.jsonl")
 _REGISTRY_OUT = os.path.join(_ROOT, "rlvr", "_models_sft_vs_rlvr.json")
+
+# NOTE: this delegates to pipeline/eval_harness.py, which scores by INJECTING a palette
+# word_source (the old function-call convention). The RLVR reward instead judges the
+# model's OWN crossword (word_source=None -> embedded _WORDS, validated vs words_alpha).
+# So these numbers measure "fills a given palette", not "create your own". For an
+# apples-to-apples RLVR eval, mirror rlvr/reward.reward_from_text over generated outputs.
 
 
 def _entry(provider: str, base_url: str, model: str) -> dict:

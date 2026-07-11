@@ -64,13 +64,17 @@ if not os.path.exists("/content/slm"):
     !git clone -q $REPO_URL /content/slm
 os.chdir("/content/slm")
 sys.path.insert(0, "/content/slm")   # so `import rlvr.reward` / harness / pipeline resolve
-assert os.path.isdir("rlvr") and os.path.isdir("harness"), "repo layout unexpected"
+for _p in ("rlvr", "harness", "pipeline", "data/sft_hardcoded_words", "data/wordlists/words_alpha.txt"):
+    assert os.path.exists(_p), f"missing {_p} -- push rlvr/ + data to the repo"
 
 from google.colab import drive
 drive.mount("/content/drive")
-SFT_ADAPTER = "/content/drive/MyDrive/slm_ckpt/qwen3-4b-crossword-qlora"
-assert os.path.isdir(SFT_ADAPTER), f"SFT adapter not found at {SFT_ADAPTER} -- run the SFT notebook first"
-print("repo:", os.getcwd(), "| sft adapter:", SFT_ADAPTER)'''),
+# the hardcoded-words SFT LoRA adapter (~268MB). GRPO CONTINUES this adapter (is_trainable=True).
+# (You also have a ...-hardcoded-merged fp16 model on Drive; not needed -- the adapter + HF base is lighter.)
+SFT_ADAPTER = "/content/drive/MyDrive/slm_ckpt/qwen3-4b-crossword-qlora-hardcoded"
+assert os.path.exists(os.path.join(SFT_ADAPTER, "adapter_config.json")), \
+    f"LoRA adapter not found at {SFT_ADAPTER} (expected an adapter dir, not the merged model)"
+print("repo:", os.getcwd(), "| adapter:", SFT_ADAPTER)'''),
 
  (MD, "## 3. Config\n"
       "GRPO LR is far below SFT (2e-4): RL nudges an already-good policy. `num_generations` is "
@@ -80,14 +84,17 @@ print("repo:", os.getcwd(), "| sft adapter:", SFT_ADAPTER)'''),
       "before committing to a full run."),
  (CO, r'''SMOKE = True   # flip to False for the full run
 
-BASE_MODEL   = "Qwen/Qwen3-4B-Instruct-2507"   # must match the SFT base
-GRPO_OUT     = "qwen3-4b-crossword-grpo"        # output adapter dir
+BASE_MODEL   = "Qwen/Qwen3-4B-Instruct-2507"   # fallback base; cell 4 reads the real one from the adapter config
+GRPO_OUT     = "qwen3-4b-crossword-grpo"        # output: the continued (GRPO-refined) LoRA adapter dir
 LOAD_4BIT    = True                             # 4-bit QLoRA policy (set False on A100 for cleaner vLLM sync)
 USE_VLLM     = True                             # colocated fast rollouts; fallback below if it errors
+SIZES        = (7,) if SMOKE else (7, 9)        # 11/15 use slow template fills (~35s x2 per rollout)
 
 from rlvr.reward import RewardConfig
 # require_symmetry=False to start (symmetry makes `valid` sparse); anneal to True later.
-reward_cfg = RewardConfig(n_draws=2, require_symmetry=False, max_workers=8)
+# The reward runs each program TWICE (own _WORDS + injected palette) for the memorization
+# check, sandboxed; per-size timeouts live in rlvr/reward.py.
+reward_cfg = RewardConfig(require_symmetry=False, max_workers=8)
 
 num_generations = 4 if SMOKE else 8
 grpo_kwargs = dict(
@@ -110,17 +117,22 @@ grpo_kwargs = dict(
 )
 print("SMOKE:", SMOKE, "| num_generations:", num_generations)'''),
 
- (MD, "## 4. Load base in 4-bit + attach the SFT LoRA as the trainable policy\n"
-      "We continue the existing adapter (`is_trainable=True`) rather than starting a fresh "
-      "LoRA, so GRPO refines what SFT learned. Same nf4 4-bit config as the SFT notebook."),
- (CO, r'''import torch
+ (MD, "## 4. Load the base in 4-bit + continue the SFT LoRA as the trainable policy\n"
+      "The base id is read from the adapter's own `adapter_config.json` (so it can't drift), loaded "
+      "4-bit (nf4), then your SFT adapter is attached with `is_trainable=True` — GRPO refines the "
+      "*exact* weights SFT learned. The tokenizer ships inside the adapter dir."),
+ (CO, r'''import os, json, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 
 bf16_ok = torch.cuda.is_bf16_supported()
 compute_dtype = torch.bfloat16 if bf16_ok else torch.float16
 
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+base_id = json.load(open(os.path.join(SFT_ADAPTER, "adapter_config.json"))).get(
+    "base_model_name_or_path") or BASE_MODEL
+print("base model:", base_id)
+
+tokenizer = AutoTokenizer.from_pretrained(SFT_ADAPTER, trust_remote_code=True)  # adapter dir ships the tokenizer
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"   # generation-time padding
@@ -130,26 +142,28 @@ if LOAD_4BIT:
     quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                bnb_4bit_compute_dtype=compute_dtype, bnb_4bit_use_double_quant=True)
 base = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL, quantization_config=quant, device_map={"": 0},
+    base_id, quantization_config=quant, device_map={"": 0},
     torch_dtype=compute_dtype, trust_remote_code=True)
 
-# attach the SFT adapter as the trainable policy (continue, don't reinit)
+# continue the SFT adapter as the trainable policy (resume its weights, don't reinit)
 policy = PeftModel.from_pretrained(base, SFT_ADAPTER, is_trainable=True)
 policy.print_trainable_parameters()'''),
 
  (MD, "## 5. Reward + prompt dataset\n"
-      "`build_grpo_dataset` yields the ~10 unique construct-from-scratch prompts (sizes 7/9) with "
-      "a flat `size` column TRL forwards to the reward. Low prompt diversity is inherent (it IS "
-      "the deployment distribution) — `n_repeats` just adds optimizer steps; real variety comes "
-      "from `num_generations`/`temperature`. The reward is sandboxed (untrusted model code)."),
- (CO, r'''from rlvr.reward import make_reward_fn, get_palette
+      "`build_grpo_dataset` reads the hardcoded-words corpus (`data/sft_hardcoded_words/`) and "
+      "yields the ~5-per-size unique prompts for `SIZES`, each with a flat `size` column TRL "
+      "forwards to the reward. Low prompt diversity is inherent (it IS the deployment "
+      "distribution) — `n_repeats` just adds optimizer steps; real variety comes from "
+      "`num_generations`/`temperature`. The reward warms a palette + the 370k-word dictionary "
+      "and runs untrusted model code sandboxed."),
+ (CO, r'''from rlvr.reward import make_reward_fn, get_palette, get_dictionary
 from rlvr.prompts import build_grpo_dataset
 
-get_palette()   # warm the palette cache once (needs wordfreq + data/wordlists)
+get_palette(); get_dictionary()   # warm caches once (needs wordfreq + data/wordlists/)
 reward_fn = make_reward_fn(reward_cfg)
 
 n_repeats = 2 if SMOKE else 20
-train_ds = build_grpo_dataset(train_path="rlvr/dataset/train.jsonl", n_repeats=n_repeats)
+train_ds = build_grpo_dataset(sizes=SIZES, n_repeats=n_repeats)   # default path: data/sft_hardcoded_words
 if SMOKE:
     train_ds = train_ds.select(range(min(4, len(train_ds))))
 print(train_ds, "\n example:", train_ds[0]["prompt"][-1]["content"], "| size", train_ds[0]["size"])'''),
@@ -181,7 +195,7 @@ tokenizer.save_pretrained(GRPO_OUT)
 !cp -r {GRPO_OUT} /content/drive/MyDrive/slm_ckpt/ 2>/dev/null; echo "saved {GRPO_OUT} to Drive"'''),
 
  (MD, "## Next\n"
-      "Compare SFT vs RLVR on the pristine held-out `rlvr/dataset/eval.jsonl` with "
+      "Compare SFT vs RLVR on the pristine held-out `data/sft_hardcoded_words/eval.jsonl` with "
       "`rlvr/eval_compare.py` (reuses `pipeline/eval_harness.py`): valid_rate, within_spec_rate, "
       "coverage, crossings, vocab/filler_fraction, invalid_crossing/entry_frac. If SMOKE looked "
       "healthy (reward varies across steps, KL stable, adapter saved), set `SMOKE=False` and "

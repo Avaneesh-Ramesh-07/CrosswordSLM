@@ -1,23 +1,19 @@
-"""Verifiable reward for RLVR/GRPO — turns one generated program into a scalar.
+"""Verifiable reward for RLVR/GRPO on the SELF-CONTAINED (hardcoded-words) SLM.
 
-The policy emits a `generate_crossword(topic, word_source, size)` program from a
-bare "make an NxN vocabulary crossword" request. We reward it by running that
-program through the EXISTING sandbox + deterministic scorer (untrusted output ->
-`in_process=False`) and folding the scorer's criteria into a composite reward:
+The SLM emits `generate_crossword(topic="vocabulary", word_source=None, size=N)` whose
+body begins `word_source = word_source or _WORDS` -- called with no word_source it uses
+its OWN embedded word list and returns a layout dict. So the reward:
 
-    R = (1 - binary_weight) * R_graded + binary_weight * R_binary
+  1. runs it with word_source=[]  -> the model's OWN crossword (this is what's graded)
+  2. runs it with an injected palette -> ONLY to catch memorization
+  3. requires the two grids to DIFFER: a program that returns one fixed literal grid is
+     insensitive to word_source (same grid both runs) -> memorization penalty.
 
-- R_graded  : dense shaping so partly-valid grids still get signal (validity rate,
-              density vs target, vocab fraction, coverage, crossings, clean
-              crossings/entries, fill quality, runtime).
-- R_binary  : the user's yes/no gates (valid? no invalid crossings? >=X% vocab?
-              black squares within target? connected (subsumed by valid)?
-              crossings>0?), averaged.
-
-Everything reuses `pipeline/eval_harness.py` + `pipeline/oe_evaluator.py`; nothing
-in the verifier is modified. Reward-time constraints come from a CANONICAL per-size
-Spec (not the per-row effective_spec), because identical prompts must not earn
-contradictory rewards under GRPO's within-group advantage normalization.
+Words are self-chosen, so "real word" is validated against a broad English dictionary
+(data/wordlists/words_alpha.txt); educational quality is `vocab_fraction` vs the palette.
+No coverage term (there is no injected target vocabulary). All execution is sandboxed
+(untrusted model code). Reward = (1-bw)*graded + bw*binary, then * memo_penalty if the
+program failed the distinctness check.
 """
 
 from __future__ import annotations
@@ -31,42 +27,48 @@ from functools import lru_cache
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from harness.scorer import Spec
+from harness.sandbox import run_candidate
+from harness.scorer import Spec, score
 from pipeline.eval_harness import build_palette, extract_code
-from pipeline.oe_evaluator import evaluate_code
 
-# Modal per-size constraints from the training corpus (build_dataset effective_spec).
-# The model never sees these in the prompt, so the reward pins one canonical Spec
-# per size instead of using the row's effective_spec.
-_DENSITY_BY_SIZE = {7: 0.80, 9: 0.76, 11: 0.74}
-_TIME_BUDGET_BY_SIZE = {7: 3.0, 9: 5.0, 11: 5.0}
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DICT_PATH = os.path.join(_ROOT, "data", "wordlists", "words_alpha.txt")
+
+# Per-size constraints (density from spec_generator's NYT-shaped targets) and sandbox
+# timeouts (the hardcoded generator has an internal ~21s deadline at size 15).
+_DENSITY_BY_SIZE = {7: 0.80, 9: 0.76, 11: 0.74, 15: 0.72}
+_TIME_BUDGET_BY_SIZE = {7: 5.0, 9: 8.0, 11: 15.0, 15: 25.0}
+_TIMEOUT_BY_SIZE = {7: 10.0, 9: 14.0, 11: 22.0, 15: 35.0}
 
 
 @dataclass
 class RewardConfig:
-    n_draws: int = 2                      # >=2 punishes lucky-seed nondeterminism
-    cap: int | None = None                # None=full palette; int=subsample (word anti-hardcode)
     require_symmetry: bool = False        # symmetry curriculum: start off, anneal to True
     min_vocab_fraction: float = 0.70      # ">=X% real vocabulary" gate
-    coverage_target: float = 0.15         # SAT-target coverage is hard; modest, tunable
     density_slack: float = 0.10           # binary black-square gate = density_target - slack
-                                          # (density_target is aspirational/soft, not a hard floor)
     min_word_len: int = 3
-    binary_weight: float = 0.30           # R = (1-bw)*graded + bw*binary
+    binary_weight: float = 0.30
+    memo_penalty: float = 0.30            # reward *= this when the two runs are NOT distinct
     floor_no_code: float = 0.0            # no parseable program
-    floor_no_run: float = 0.05            # parsed but every draw failed to run
-    max_workers: int = 8                  # reward is subprocess-I/O bound -> parallelize a batch
+    floor_no_run: float = 0.05            # parsed but its own run failed to produce a grid
+    max_workers: int = 8
     graded_weights: dict = field(default_factory=lambda: {
-        "valid": 0.25, "density": 0.15, "vocab": 0.15, "coverage": 0.10,
-        "crossings": 0.10, "clean_cross": 0.10, "clean_entry": 0.05,
-        "quality": 0.05, "runtime": 0.05,
+        "valid": 0.30, "density": 0.15, "vocab": 0.20, "crossings": 0.15,
+        "clean_cross": 0.10, "clean_entry": 0.05, "quality": 0.05,
     })
 
 
 @lru_cache(maxsize=1)
 def get_palette() -> dict:
-    """{word_source, vocab_set, scores, targets} — spec-independent, built once."""
+    """{word_source, vocab_set, scores, targets} — built once."""
     return build_palette()
+
+
+@lru_cache(maxsize=1)
+def get_dictionary() -> frozenset:
+    """Broad English dictionary for the real-word check (model self-sources words)."""
+    with open(_DICT_PATH, encoding="utf-8") as fh:
+        return frozenset(w.strip().upper() for w in fh if w.strip())
 
 
 def canonical_eff(size: int, cfg: RewardConfig) -> dict:
@@ -75,16 +77,16 @@ def canonical_eff(size: int, cfg: RewardConfig) -> dict:
         "size": size,
         "require_symmetry": cfg.require_symmetry,
         "min_word_len": cfg.min_word_len,
-        "time_budget_s": _TIME_BUDGET_BY_SIZE.get(size, 5.0),
-        "density_target": _DENSITY_BY_SIZE.get(size, 0.72),
-        "topic": "vocabulary",
+        "time_budget_s": _TIME_BUDGET_BY_SIZE.get(size, 8.0),
+        "density_target": _DENSITY_BY_SIZE.get(size, 0.74),
     }
 
 
-def build_spec(eff: dict, palette: dict) -> Spec:
+def build_spec(eff: dict) -> Spec:
+    # topic_words=() -> coverage is 1.0/ignored (no injected target vocabulary)
     return Spec(
         size=int(eff["size"]),
-        topic_words=tuple(palette["targets"]),
+        topic_words=(),
         require_symmetry=eff["require_symmetry"],
         min_word_len=eff["min_word_len"],
         time_budget_s=eff["time_budget_s"],
@@ -106,16 +108,12 @@ def compute_reward(metrics: dict, eff: dict, cfg: RewardConfig) -> tuple[float, 
     dt = eff["density_target"]
     size = eff["size"]
 
-    valid = _num(metrics, "valid")                    # validity RATE across draws (0..1)
+    valid = _num(metrics, "valid")
     fill_density = _num(metrics, "fill_density")
     vocab_fraction = 1.0 - _num(metrics, "filler_fraction")
-    coverage = _num(metrics, "coverage")
     crossings = _num(metrics, "crossings")
     inv_cross = _num(metrics, "invalid_crossing_frac")
     inv_entry = _num(metrics, "invalid_entry_frac")
-    # Gate "absence of bad" credits on the grid actually having content, so an empty
-    # / near-empty grid can't farm reward from "no filler, no invalid crossings, fast
-    # runtime" (a reward-hacking hole the dryrun surfaced).
     has_entries = _num(metrics, "n_entries") > 0
     has_cross = crossings > 0
 
@@ -123,12 +121,10 @@ def compute_reward(metrics: dict, eff: dict, cfg: RewardConfig) -> tuple[float, 
         "valid": _clamp(valid),
         "density": _clamp(fill_density / dt) if dt else 0.0,
         "vocab": _clamp(vocab_fraction / cfg.min_vocab_fraction) if has_entries else 0.0,
-        "coverage": _clamp(coverage / cfg.coverage_target) if cfg.coverage_target else 0.0,
         "crossings": _clamp(crossings / max(1, size)),
         "clean_cross": _clamp(1.0 - inv_cross) if has_cross else 0.0,
         "clean_entry": _clamp(1.0 - inv_entry) if has_entries else 0.0,
         "quality": _clamp(_num(metrics, "fill_quality")) if has_entries else 0.0,
-        "runtime": _clamp(_num(metrics, "runtime_ok")) if has_entries else 0.0,
     }
     w = cfg.graded_weights
     wsum = sum(w.values()) or 1.0
@@ -139,8 +135,7 @@ def compute_reward(metrics: dict, eff: dict, cfg: RewardConfig) -> tuple[float, 
         "no_bad_cross": 1.0 if (has_cross and inv_cross == 0.0) else 0.0,
         "no_bad_entry": 1.0 if (has_entries and inv_entry == 0.0) else 0.0,
         "vocab": 1.0 if (has_entries and vocab_fraction >= cfg.min_vocab_fraction) else 0.0,
-        "density": 1.0 if fill_density >= dt - cfg.density_slack else 0.0,  # not too many black squares
-        "coverage": 1.0 if coverage >= cfg.coverage_target else 0.0,
+        "density": 1.0 if fill_density >= dt - cfg.density_slack else 0.0,
         "crossings": 1.0 if crossings > 0 else 0.0,
     }
     r_binary = sum(binary.values()) / len(binary)
@@ -152,40 +147,60 @@ def compute_reward(metrics: dict, eff: dict, cfg: RewardConfig) -> tuple[float, 
     return reward, breakdown
 
 
-def score_code_multi(code: str, eff: dict, palette: dict, cfg: RewardConfig) -> dict:
-    """Sandbox-run + score a program across n_draws. Returns evaluate_code output."""
-    spec = build_spec(eff, palette)
-    return evaluate_code(
-        code, spec,
-        word_source=palette["word_source"],
-        scores=palette["scores"],
-        n_draws=cfg.n_draws,
-        cap=cfg.cap,
-        vocab_set=palette["vocab_set"],
-        quality_penalty=False,     # reward composes penalties itself
-        in_process=False,          # UNTRUSTED model output -> subprocess sandbox
+def _run(code: str, size: int, word_source, cfg: RewardConfig) -> dict:
+    """Sandbox-run generate_crossword(topic, word_source, size). word_source=[] (falsy)
+    makes the model fall back to its own embedded _WORDS."""
+    return run_candidate(
+        code,
+        {"topic": "vocabulary", "word_source": word_source, "size": int(size), "seed": 0},
+        timeout_s=_TIMEOUT_BY_SIZE.get(int(size), 15.0), mem_mb=1536,
     )
 
 
+def _score_layout(layout, eff: dict, scorer_word_source, runtime_s, palette: dict) -> dict:
+    return score(layout, build_spec(eff), word_source=scorer_word_source,
+                 dictionary=get_dictionary(), runtime_s=runtime_s,
+                 vocab_set=palette["vocab_set"])
+
+
+def _answers(layout) -> frozenset:
+    if not isinstance(layout, dict):
+        return frozenset()
+    out = set()
+    for key in ("across", "down"):
+        for e in layout.get(key, []) or []:
+            try:
+                out.add((int(e["row"]), int(e["col"]), str(e["answer"]).upper()))
+            except (KeyError, TypeError, ValueError):
+                pass
+    return frozenset(out)
+
+
 def reward_from_text(text: str, size: int, palette: dict, cfg: RewardConfig) -> tuple[float, dict]:
-    """Full path: completion text -> code -> sandbox -> scorer -> composite reward."""
+    """completion -> code -> (own-words run graded) with a memorization penalty."""
     code = extract_code(text)
     if not code:
         return cfg.floor_no_code, {"reward": cfg.floor_no_code, "reason": "no_code"}
     eff = canonical_eff(size, cfg)
-    try:
-        out = score_code_multi(code, eff, palette, cfg)
-    except Exception as exc:  # sandbox/scoring blew up -> treat as non-run
-        return cfg.floor_no_run, {"reward": cfg.floor_no_run, "reason": f"error:{exc}"[:200]}
-    ran_any = any(r.get("status") == "ok" for r in out["fuzz"]["results"])
-    if not ran_any:
-        return cfg.floor_no_run, {"reward": cfg.floor_no_run, "reason": "no_run",
-                                  "statuses": [r.get("status") for r in out["fuzz"]["results"]]}
-    return compute_reward(out["metrics"], eff, cfg)
+
+    # 1) the model's OWN crossword (word_source=[] -> uses embedded _WORDS)
+    runA = _run(code, size, [], cfg)
+    if runA.get("status") != "ok":
+        return cfg.floor_no_run, {"reward": cfg.floor_no_run, "reason": f"own_run:{runA.get('status')}"}
+    metricsA = _score_layout(runA["result"], eff, [], runA.get("runtime_s"), palette)
+    reward, bd = compute_reward(metricsA, eff, cfg)
+
+    # 2) memorization check: run with an injected palette; a literal-returner yields the
+    #    SAME grid -> penalize. (If it crashes/adapts, it's not a constant -> no penalty.)
+    runB = _run(code, size, palette["word_source"], cfg)
+    memorized = runB.get("status") == "ok" and _answers(runB["result"]) == _answers(runA["result"])
+    if memorized:
+        reward *= cfg.memo_penalty
+    bd.update({"reward": round(reward, 4), "distinct": not memorized, "memorized": memorized})
+    return reward, bd
 
 
 def _completion_text(completion) -> str:
-    """GRPO passes a str (standard) or a list of message dicts (conversational)."""
     if isinstance(completion, str):
         return completion
     if isinstance(completion, list) and completion:
@@ -195,22 +210,18 @@ def _completion_text(completion) -> str:
 
 
 def make_reward_fn(cfg: RewardConfig | None = None):
-    """Build a TRL GRPOTrainer-compatible reward function.
-
-    Signature: reward_fn(prompts, completions, **cols) -> list[float]. The dataset's
-    flat `size` column arrives in `cols`; the canonical Spec is derived from it. The
-    batch is scored concurrently since each reward is subprocess-I/O bound.
-    """
+    """TRL GRPOTrainer-compatible reward: reward_fn(prompts, completions, **cols)->list[float].
+    Reads the flat `size` column; scores the batch concurrently (subprocess-I/O bound)."""
     cfg = cfg or RewardConfig()
     palette = get_palette()
+    get_dictionary()  # warm cache once
 
     def reward_fn(prompts=None, completions=None, **cols):
         texts = [_completion_text(c) for c in (completions or [])]
         sizes = cols.get("size") or [7] * len(texts)
 
         def _one(i):
-            r, _ = reward_from_text(texts[i], int(sizes[i]), palette, cfg)
-            return r
+            return reward_from_text(texts[i], int(sizes[i]), palette, cfg)[0]
 
         if len(texts) <= 1 or cfg.max_workers <= 1:
             return [_one(i) for i in range(len(texts))]
