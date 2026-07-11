@@ -36,6 +36,8 @@ cells = [
       "# train cell absorbs any trl API drift.\n"
       "!pip uninstall -y -q vllm torchao      # vllm(cu13) crashes TRL import; torchao 0.10 breaks recent peft\n"
       "!pip install -q trl wordfreq           # trl only if missing (keeps Colab's); wordfreq required\n"
+      "import os\n"
+      "os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'  # set BEFORE torch inits CUDA\n"
       "import torch, transformers, peft, trl, accelerate, datasets\n"
       "print(f'torch {torch.__version__} | transformers {transformers.__version__} | peft {peft.__version__} '\n"
       "      f'| trl {trl.__version__} | accelerate {accelerate.__version__} | datasets {datasets.__version__}')"),
@@ -106,7 +108,7 @@ from rlvr.reward import RewardConfig
 # check, sandboxed; per-size timeouts live in rlvr/reward.py.
 reward_cfg = RewardConfig(require_symmetry=False, max_workers=8)
 
-num_generations = 2 if SMOKE else 8   # smoke: GRPO minimum group; cost = steps x num_generations x ~3.5k tokens
+num_generations = 2 if SMOKE else 4   # logits tensor ~ num_generations x seqlen x vocab(152k); 8 OOMs on 80GB. Drop to 2 if still OOM.
 grpo_kwargs = dict(
     output_dir="grpo_results",
     learning_rate=1e-6,
