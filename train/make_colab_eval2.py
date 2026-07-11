@@ -121,17 +121,18 @@ cells = [
       "the assistant turn). If it's missing, every sequence runs to the full `MAX_NEW_TOKENS`. "
       "We pass the stop ids explicitly (`EOS_IDS`, includes `<|im_end|>`) so generation ends as "
       "soon as the program is done.\n"
-      "2. **`MAX_NEW_TOKENS`.** Full programs measure **7×7 ~4.2k, 11×11 ~5.6k, 15×15 ~12–14k "
-      "tokens**. We use **8192** = the model's training seq-len (its coherent ceiling): it fits "
-      "7/9/11 completely, and a larger cap doesn't help 15×15 (below) while making every "
-      "run-to-cap sequence slower. `BATCH` is auto-tuned to the GPU (8 on an A100, 4 elsewhere).\n\n"
-      "> ⚠️ **15×15 is limited by *training*.** The model was fine-tuned at `max_seq_length = "
-      "8192`, so the ~12–14k-token 15×15 programs were truncated in training — it never saw a "
-      "complete one and can't emit one, so its 15×15 samples **run to the cap and will fail the "
-      "gauge**. **7×7/9×9/11×11 are fully covered — and are the default `SIZES` below** (15×15 is "
-      "skipped). Add `15` back only after retraining at a longer seq-len."),
+      "2. **`MAX_NEW_TOKENS`.** Measured on the hardcoded dataset with the model's own "
+      "tokenizer, full programs are **7×7 / 9×9 ≤ ~4.1k tokens** and **11×11 up to ~5.9k in the "
+      "eval set (~8.85k across all of training)** — the baked word list dominates the length. "
+      "The model is fine-tuned at **`max_seq_length = 10240`**, so we set **`MAX_NEW_TOKENS = "
+      "9728`**: comfortably above the largest 11×11 program (~8.85k) so no valid generation is "
+      "truncated, while prompt+completion stays under the 10240 training ceiling. `BATCH` is "
+      "auto-tuned to the GPU (8 on an A100, 4 elsewhere).\n\n"
+      "> **15×15 is not evaluated.** It was dropped from training entirely (its ~12–14k-token "
+      "programs exceeded the sequence budget), so the model is trained and evaluated on **7/9/11 "
+      "only** — matching the EVAL 2 comparison restricted to those sizes (25 each = 75)."),
  (CO, 'GEN_TEMP       = 1.0     # varied samples; use 0.0 for greedy/deterministic\n'
-      'MAX_NEW_TOKENS = 8192    # model training ceiling; fits 7/9/11, caps 15x15 (see note above)\n\n'
+      'MAX_NEW_TOKENS = 9728    # < 10240 training ceiling; > largest 11x11 program (~8.85k tok) so nothing truncates\n\n'
       'import torch, time\n'
       '_vram = torch.cuda.get_device_properties(0).total_memory / 1e9\n'
       'BATCH = 8 if _vram >= 38 else 4    # A100-40GB -> 8; L4/T4 -> 4 (drop to 2 on a T4 if you OOM)\n'
@@ -191,14 +192,16 @@ cells = [
       '    print("OK: generation stops on its own. 7/9/11 are quick; 15x15 runs to the cap (slower).")'),
 
  (MD, "## 6. Generate on the bare `eval.jsonl` prompts, then SAVE programs + specs\n"
-      "Sizes 7/9/11 (15×15 skipped — training-capped), `PER_SIZE` prompts each. For each prompt we save the extracted program "
+      "Sizes 7/9/11 at **25 prompts each = 75** — the EVAL 2 protocol restricted to the trained "
+      "sizes (15×15 dropped). Same file + seed as Claude's EVAL 2, so these are the identical "
+      "7/9/11 bare prompts. For each prompt we save the extracted program "
       "to `progs/prog_<i>_s<NN>.py` (the size is in the filename so it can be run at the right "
       "size later), the raw completion to `raw/`, and one row per prompt to `specs.jsonl` "
       "(`idx, size, prog_file, parsed, system, user`). **No scoring** — that's done locally."),
  (CO, 'import os, json\n'
       'from pipeline.eval_opus_evalset import load_prompts\n'
       'from pipeline.eval_harness import extract_code\n\n'
-      'SIZES = [7, 9, 11]; PER_SIZE = 25   # 25/size matches Claude EVAL 2 (25x4=100 there); 15x15 skipped (training-capped)\n'
+      'SIZES = [7, 9, 11]; PER_SIZE = 25   # EVAL 2 protocol on trained sizes: 25/size x [7,9,11] = 75 (15x15 dropped)\n'
       'prompts = load_prompts("data/sft/eval.jsonl", SIZES, PER_SIZE)   # (system, user, size), BARE\n'
       'print(f"{len(prompts)} bare prompts")\n'
       'print(f"  example -> system={prompts[0][0]!r}\\n             user={prompts[0][1]!r}")\n\n'
