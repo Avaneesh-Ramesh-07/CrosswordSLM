@@ -1,4 +1,4 @@
-"""Generate train/colab_eval_tuned.ipynb — query the tuned SLM and SAVE its programs.
+"""Generate train/colab_eval_hardcoded.ipynb — query the tuned HARDCODED-words SLM and SAVE its programs.
 
 This notebook does ONE job: feed the held-out `eval.jsonl` deployment prompts to the tuned
 **hardcoded-words** model and **save every emitted `generate_crossword` program together with
@@ -10,7 +10,7 @@ Gauging happens locally (outside Colab): each saved program is run **self-contai
 (structure + real-dictionary words), exactly the way the 36 hardcoded dataset programs were
 gauged. So Colab only needs a GPU + the model; no palette / wordfreq / scoring code runs here.
 
-    python train/make_colab_eval2.py
+    python train/make_colab_eval_hardcoded.py
 """
 
 import json
@@ -317,7 +317,7 @@ def build():
         "nbformat": 4,
         "nbformat_minor": 5,
     }
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "colab_eval_tuned.ipynb")
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "colab_eval_hardcoded.ipynb")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(nb, fh, indent=1)
     return out

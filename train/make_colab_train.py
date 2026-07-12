@@ -5,7 +5,7 @@ Adapted from the standard Llama-2 QLoRA SFT notebook (training_example.ipynb), b
   * dataset = enhanced non-hardcoded chat JSONL (data/sft_non_hardcoded_enhanced/), size-routed recipe
   * RESPONSE-ONLY loss (mask system+user; train only on the assistant program)
   * dev split used for in-training validation; eval split left untouched
-  * save LoRA + merged fp16 model; points to colab_eval_tuned.ipynb for base-vs-tuned eval
+  * save LoRA + merged fp16 model; points to colab_eval_non_hardcoded.ipynb for base-vs-tuned eval
 
     python train/make_colab_train.py
 """
@@ -24,7 +24,7 @@ cells = [
       "system contract → size-specific `NxN` user prompt → verified assistant program, each carrying "
       "only its own size's template under a one-line technique header), **response-only loss**, dev "
       "for validation, `eval` held out for "
-      "the base-vs-tuned test (see `colab_eval_tuned.ipynb`)."),
+      "the base-vs-tuned test (see `colab_eval_non_hardcoded.ipynb`)."),
 
  (MD, "## 1. Install (pinned, Qwen3-capable snapshot)\n"
       "Versions are **pinned**, not `>=`, on purpose: the current `trl` (1.x) **removed** "
@@ -339,7 +339,7 @@ cells = [
       "Your trained artifacts are in Drive (`MyDrive/slm_ckpt/`): the LoRA adapter "
       "(`qwen3-4b-crossword-qlora`) and the merged fp16 model (`…-merged`) for inference / "
       "GGUF export.\n\n"
-      "Eval is run **separately** in `colab_eval_tuned.ipynb` (EVAL 2 on the tuned model). The "
+      "Eval is run **separately** in `colab_eval_non_hardcoded.ipynb` (harness-scored, vs Claude EVAL 3). The "
       "goal is the base-vs-tuned comparison in `GAP_ANALYSIS.md`: score the tuned model on the "
       "pristine held-out `eval.jsonl` through the sandbox+scorer and compare against "
       "unaugmented Opus (~5–7% valid) — target is high pass@1."),
