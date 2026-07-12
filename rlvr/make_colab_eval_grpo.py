@@ -18,9 +18,9 @@ cells = [
  (MD, "# Eval: GRPO (and SFT) adapter on held-out `eval.jsonl`\n\n"
       "Loads **base + LoRA adapter** (no merge) and generates on the pristine held-out prompts, "
       "then scores each program with the training verifier (`rlvr.reward.evaluate_text`): valid, "
-      "vocab %, crossings, invalid-crossing/entry, black-square delta, memorized. Runs every "
-      "adapter in `ADAPTERS` so SFT vs GRPO print side by side. HF generation (no vLLM). "
-      "**L4/A100.** Run top to bottom."),
+      "vocab %, crossings, invalid-crossing/entry, black-square delta, memorized. Evaluates the "
+      "GRPO adapter by default; add an `sft` entry to `ADAPTERS` to print SFT vs GRPO side by side. "
+      "HF generation (no vLLM). **L4/A100.** Run top to bottom."),
 
  (MD, "## 1. Install (no -U; remove the two packages that break peft/import)"),
  (CO, "!pip uninstall -y -q vllm torchao   # torchao 0.10 breaks recent peft; vllm not needed for eval\n"
@@ -33,7 +33,9 @@ cells = [
  (MD, "## 2. Get the repo + mount Drive\n"
       "Needs `rlvr/`, `harness/`, `pipeline/`, `data/sft_hardcoded_words/`, `data/wordlists/`."),
  (CO, f'REPO_URL = "{REPO_URL}"\n' + r'''import os, sys, torch
-if not os.path.exists("/content/slm"):
+if os.path.exists("/content/slm"):
+    !git -C /content/slm pull -q            # refresh: reruns pick up latest rlvr/ (e.g. evaluate_text)
+else:
     !git clone -q $REPO_URL /content/slm
 os.chdir("/content/slm"); sys.path.insert(0, "/content/slm")
 assert torch.cuda.is_available(), "No GPU -- Runtime > Change runtime type > L4/A100"
@@ -47,8 +49,9 @@ print("GPU:", torch.cuda.get_device_name(0))'''),
       "programs is slow in HF, so keep SAMPLES modest."),
  (CO, r'''CKPT = "/content/drive/MyDrive/slm_ckpt"
 ADAPTERS = {
-    "sft":  f"{CKPT}/qwen3-4b-crossword-qlora-hardcoded",   # comment out to skip
     "grpo": f"{CKPT}/qwen3-4b-crossword-grpo",
+    # to also compare the SFT baseline, add:
+    # "sft": f"{CKPT}/qwen3-4b-crossword-qlora-hardcoded",
 }
 SIZES          = (7, 9, 11)   # 15 is slow (long template fills); add if you want
 SAMPLES        = 2            # completions per prompt
@@ -121,11 +124,11 @@ for name, adapter in ADAPTERS.items():
             "pass@k": passk, "mean_reward": round(sum(r["reward"] for r in recs) / n, 3) if n else 0.0,
             "vocab_frac": mean("vocab_fraction"), "crossings": mean("crossings"),
             "inv_cross": mean("invalid_crossing_frac"), "inv_entry": mean("invalid_entry_frac"),
-            "|black-Δ|": (round(sum(abs(r["black_squares"] - r["black_target"]) for r in ran) / len(ran), 2)
+            "black_gap": (round(sum(abs(r["black_squares"] - r["black_target"]) for r in ran) / len(ran), 2)
                           if ran else 0.0),
             "memorized": round(sum(r["memorized"] for r in recs) / n, 3) if n else 0.0}
 
-cols = ["n", "valid_rate", "pass@k", "mean_reward", "vocab_frac", "crossings", "inv_cross", "inv_entry", "|black-Δ|", "memorized"]
+cols = ["n", "valid_rate", "pass@k", "mean_reward", "vocab_frac", "crossings", "inv_cross", "inv_entry", "black_gap", "memorized"]
 print(f"\n{'model':<8}" + "".join(f"{c:>12}" for c in cols))
 print("-" * (8 + 12 * len(cols)))
 summary = {}
@@ -150,9 +153,10 @@ json.dump({"summary": summary, "config": {"sizes": list(SIZES), "samples": SAMPL
  (MD, "## Reading it\n"
       "**valid_rate / pass@k** = fully-valid crosswords (strict, symmetry off). **vocab_frac** = share "
       "of answers in the purified list. **crossings** = interlock count. **inv_cross/inv_entry** should "
-      "be ~0. **|black-Δ|** = distance from the size's black-square target. **memorized** should stay "
-      "low. Compare `grpo` vs `sft` rows: RLVR should lift valid_rate / crossings / lower inv_* without "
-      "tanking vocab_frac. Held-out prompts were never trained on, so this is a fair generalization test."),
+      "be ~0. **black_gap** = distance from the size's black-square target. **memorized** should stay "
+      "low. Held-out prompts were never trained on, so this is a fair generalization test. Add an "
+      "`sft` entry to `ADAPTERS` to get the SFT-vs-GRPO delta (RLVR should lift valid_rate / crossings "
+      "/ lower inv_* without tanking vocab_frac)."),
 ]
 
 
