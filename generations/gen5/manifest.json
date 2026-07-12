@@ -1,0 +1,191 @@
+{
+  "generation": 5,
+  "palette": "data/wordlists/WORD_LIST_FULLY_PURIFIED.txt",
+  "gate": "valid >= 11/12 at each of sizes 7, 9, 11 (12 runs)",
+  "verification": "pipeline.regen_sft scorer on the purified palette; <=4 concurrent sandbox workers",
+  "note": "Each fusion reuses reference_v1/gen4 schema+structure helpers verbatim and varies only the fill algorithm. Sizes 7/9/11 draw from pre-verified fillable templates (size 7 harvested fresh; size 9/11 curated to the fillable subset).",
+  "fusions": [
+    {
+      "name": "bandfill_longfirst",
+      "file": "generations/gen5/bandfill_longfirst.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "two_phase",
+        "length_banded",
+        "MRV",
+        "forward_check",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "mrv_fc_pidx"
+      ],
+      "technique": "long-slot skeleton first, then short slots + rescue",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "11/12"
+      }
+    },
+    {
+      "name": "degree_restart_fc",
+      "file": "generations/gen5/degree_restart_fc.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "degree",
+        "random_restart",
+        "forward_check",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "mrv_fc_pidx"
+      ],
+      "technique": "degree-biased order, random value order, node-budgeted restarts",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    },
+    {
+      "name": "domwdeg_fc",
+      "file": "generations/gen5/domwdeg_fc.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "dom_wdeg",
+        "conflict_learning",
+        "forward_check",
+        "pattern_index",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "mrv_fc_pidx"
+      ],
+      "technique": "domain/weighted-degree conflict-driven ordering + forward checking",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    },
+    {
+      "name": "dsatur_fc_templates",
+      "file": "generations/gen5/dsatur_fc_templates.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "DSATUR",
+        "MRV",
+        "forward_check",
+        "pattern_index",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "mrv_fc_pidx"
+      ],
+      "technique": "saturation-degree variable ordering + forward checking",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    },
+    {
+      "name": "lcv_fc_plain",
+      "file": "generations/gen5/lcv_fc_plain.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "MRV",
+        "LCV",
+        "forward_check",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "mrv_fc_pidx"
+      ],
+      "technique": "MRV + pure least-constraining-value + forward checking (plain)",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    },
+    {
+      "name": "mac_lcv_theme",
+      "file": "generations/gen5/mac_lcv_theme.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "MAC",
+        "MRV",
+        "LCV",
+        "theme_first",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "ac3_mrv",
+        "theme_lcv"
+      ],
+      "technique": "maintained arc consistency + theme-first LCV ordering",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    },
+    {
+      "name": "twophase_theme_cover",
+      "file": "generations/gen5/twophase_theme_cover.py",
+      "sizes": [
+        7,
+        9,
+        11
+      ],
+      "heuristics": [
+        "two_phase",
+        "theme_first",
+        "MRV",
+        "forward_check",
+        "template"
+      ],
+      "parents": [
+        "reference_v1",
+        "theme_lcv",
+        "mrv_fc_pidx"
+      ],
+      "technique": "greedy theme seating (validity-first) then MRV coverage fill + rescue",
+      "rates": {
+        "7": "12/12",
+        "9": "12/12",
+        "11": "12/12"
+      }
+    }
+  ]
+}

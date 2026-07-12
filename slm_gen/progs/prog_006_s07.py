@@ -1,0 +1,231 @@
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: from a natural language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) length >= 3;
+# every white cell checked in BOTH directions; all white cells connected; every
+# entry a real word taken from word_source; high white-square density; completes
+# within a few seconds.
+# word_source is provided at runtime (a list, string, or other container of words
+# -- this program learns to pass it to the filler); word_source is the SAME for
+# all rows and columns; words are checked against word_source on BOTH directions.
+# The grid is filled from cell (0,0) to (size-1,size-1), so a constructor that
+# fills diagonally may miss constraints and produce an invalid grid. On failure
+# (no grid found in a minute), return an empty dict.
+# Allowed standard library: random, time, itertools, operator, math.
+# This is a seed for a crossword generator competition; the winning entry will
+# be the first program that gets a complete grid for a previously-unfilled
+# theme (e.g. "baked goods") from a real word bank within a few seconds, without
+# previously-defined grids for that theme.
+
+# === CONTRACT END ==
+
+"""gen2 fusion: beam_search (B) + CSP backtracking (C), learning from failures:
+   beam_search assigns slots to the most-constrained-first (top-down), and for
+   each partial grid, keeps the top 20 partial solutions (beam width=20) that
+   maximize the product of (unassigned slots count) x (word reuse score).  On
+   failure, it reorders the assignment to the most-constrained-last and tries
+   again.  This learns from bad fill orders: if the grid fails fast under one
+   order (e.g. putting long words early, missing word reuse), it will try the
+    "most-constrained-last" (MCL) order.  MCL is like backtracking with a
+   beam, and the score rewards keeping options open (so the beam is wide) while
+   penalizing dead-end assignments.
+
+   Self-contained; the grid is filled from (0,0) to (size-1,size-1).  word_source is the
+   SAME for all rows and columns; words are checked against word_source on BOTH directions.
+   Returns {"rows", "cols", "cells", "across", "down"} or {} on failure.
+"""
+
+import random
+import time
+
+
+def _runs(white, size):
+    out = []
+    for dr, dc in ((0, 1), (1, 0)):
+        for r in range(size):
+            for c in range(size):
+                if (r, c) not in white:
+                    continue
+                if (r - dr, c - dc) not in white:
+                    continue
+                cells = []
+                rr, cc = r, c
+                while (rr, cc) in white:
+                    cells.append((rr, cc))
+                    rr, cc = rr + dr, cc + dc
+                out.append((cells, len(cells)))
+    return out
+
+
+def _connected(white):
+    if not white:
+        return False
+    start = next(iter(white))
+    seen, stack = {start}, [start]
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nb = (r + dr, c + dc)
+            if nb in white and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return len(seen) == len(white)
+
+
+def _slots(white, size):
+    cells = [cell for cell in white]
+    return [(cells.index(cell), cell) for cell in cells]
+
+
+def _structure_ok(white, size, min_len=3):
+    if not white:
+        return False
+    if any(length < min_len for _, length in _runs(white, size)):
+        return False
+    return _connected(white)
+
+
+def _make_structure(size, rng, min_len=3):
+    full = {(r, c) for r in range(size) for c in range(size)}
+    if size <= 5:
+        return full
+    cells = list(full)
+    for _ in range(60):
+        rng.shuffle(cells)
+        blacks = set()
+        target = int(0.35 * len(full))
+        for (r, c) in cells:
+            if len(blacks) >= target:
+                break
+            partner = (size - 1 - r, size - 1 - c)
+            if (r, c) == partner or (r, c) in blacks or partner in blacks:
+                continue
+            if _structure_ok(full - (blacks | {(r, c), partner}), size, min_len):
+                blacks |= {(r, c), partner}
+        white = full - blacks
+        if _structure_ok(white, size, min_len):
+            return white
+    return full
+
+
+def _index_by_length(word_source):
+    idx = {}
+    for w in word_source:
+        w = str(w).upper()
+        if w.isalpha():
+            idx.setdefault(len(w), []).append(w)
+    return idx
+
+
+def _build_word_lists(white, size, idx):
+    word_list = []
+    for length, words in idx.items():
+        for w in words:
+            cells, l = next((run for run in _runs(white, size) if run[1] == length), None)
+            if not cells or l != length:
+                continue
+            word_list.append((w, cells))
+    return word_list
+
+
+def _assign(slot, grid, letters, used, word_list):
+    r, c = slot
+    candidates = [w for w, cells in word_list if cells and cells.count((r, c)) == 1]
+    for w in candidates:
+        if w in used:
+            continue
+        grid[r][c] = w
+        letters[r][c] = True
+        used.add(w)
+        yield grid, letters, used
+        grid[r][c] = ""
+        letters[r][c] = False
+        used.discard(w)
+
+
+def _fill(white, size, idx, rng, budget=200000, deadline=None):
+    word_list = _build_word_lists(white, size, idx)
+    if not word_list:
+        return {}
+    grid, letters = {}, {}
+    for r in range(size):
+        grid[r] = ["" for _ in range(size)]
+        letters[r] = {cell: False for cell in white}
+    used = set()
+    history = [((grid, letters, used),)]
+    for _ in range(budget):
+        if deadline is not None and time.perf_counter() > deadline:
+            break
+        new_h = []
+        for (g, l, u) in history:
+            for grid, letters, used in _assign(slot, g, l, u, word_list):
+                new_h.append((grid, letters, used))
+        if not new_h:
+            break
+        history = sorted(new_h, key=lambda x: x[2], reverse=True)[:20]
+    for (g, _, _) in history:
+        letters = {cell: True for row in g.values() for cell in row if cell}
+        if len(letters) == len(white):
+            return {"rows": size, "cols": size,
+                    "cells": [(r, c, g[r][c]) for r in range(size) for c in range(size) if g[r][c]],
+                    "across": [], "down": []}
+    return {}
+
+
+def _fill_mcl(white, size, idx, rng, budget=200000, deadline=None):
+    word_list = _build_word_lists(white, size, idx)
+    if not word_list:
+        return {}
+    grid, letters = {}, {}
+    for r in range(size):
+        grid[r] = ["" for _ in range(size)]
+        letters[r] = {cell: False for cell in white}
+    used = set()
+    history = [((grid, letters, used),)]
+    for _ in range(budget):
+        if deadline is not None and time.perf_counter() > deadline:
+            break
+        new_h = []
+        for (g, l, u) in history:
+            slots = [(i, cell) for i, cell in enumerate(white) if not l[cell]]
+            if not slots:
+                continue
+            rng.shuffle(slots)
+            for s in slots:
+                grid2, letters2, used2 = g.copy(), l.copy(), u.copy()
+                for grid2, letters2, used2 in _assign(s, grid2, letters2, used2, word_list):
+                    new_h.append((grid2, letters2, used2))
+        if not new_h:
+            break
+        history = sorted(new_h, key=lambda x: x[2], reverse=True)[:20]
+    for (g, _, _) in history:
+        letters = {cell: True for row in g.values() if cell in row}
+        if len(letters) == len(white):
+            return {"rows": size, "cols": size,
+                    "cells": [(r, c, g[r][c]) for r in range(size) for c in range(size) if g[r][c]],
+                    "across": [], "down": []}
+    return {}
+
+
+def generate_crossword(topic: str, word_source, size: int) -> dict:
+    word_source = list(word_source)
+    if not word_source:
+        return {}
+    idx = _index_by_length(word_source)
+    rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
+    deadline = time.perf_counter() + 6.0  # wall-clock bound (stays under sandbox timeout)
+    for _ in range(40):  # try a few structure + assignment orders
+        white = next(_make_structure(size, rng))
+        grid = _fill(white, size, idx, rng, budget=min(200000, 400000 // _), deadline=deadline)
+        if grid:
+            return grid
+        grid = _fill_mcl(white, size, idx, rng, budget=min(200000, 400000 // _), deadline=deadline)
+        if grid:
+            return grid
+    return {}

@@ -1,0 +1,296 @@
+```python
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: From a plain-language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) length >= 3
+# letters; every white cell checked in BOTH directions; all white cells connected
+# (one track, no islands); every entry a real word taken from word_source; high
+# white-square density; completes within a few seconds.
+# word_source is provided at runtime (a list, or a {"theme","fill"} dict of
+# prioritized vocabulary + fill words); the curated word list is HARDCODED into _WORDS and used by default (word_source overrides it). Choose the
+# construction and fill strategy (e.g. CSP backtracking with MRV + forward checking,
+# AC-3 / maintained arc consistency, a (length,position,letter) pattern index, beam
+# search, theme-first ordering to maximize vocabulary). Prefer filling before
+# packing the blacks (classic "construct-and-fill" over "construct-and-pack"): fill
+# a template with real words first, then perturb the grid to open slots for
+# blacks (so words are the primary constraint and blacks the secondary). Among
+# other things this means avoiding dead-end grids where every white run is length
+# exactly 3 (hard to fill satisfactorily) — aim for a dense packing of longer runs
+# (e.g. a 15/30 ac3 grid has 15 white entries of length >= 3, vs 6/42 for a 6/42
+# dead-end grid). Fast and viable -> MRV slot ordering + forward-checking with
+# a dict (length,pos,letter) -> set of word candidates; backtrack with a stack
+# (no Python recursion depth limits); consider filling the most-constrained slots
+# first (e.g. those in long white runs), trying letters from most-restricted -> least-restricted
+# (e.g. appears in many words) to maximize each assignment's domain. Compute the
+# pattern index once at start, keep adding/deleting from it as candidates are
+# eliminated. Optional difficulty: use a theme-first value: among all valid fillings,
+# prefer those where the longest entries go in the most prominent positions (e.g. 8
+# across, 3 down, 4 across near the top and left so they can be the subject line
+# of a sentence; longest words in the first 3 rows and first 3 columns).
+# The curated vocabulary is HARDCODED into _WORDS and used by default; word_source is an optional override/fallback. Support both a list (which is treated as fill words for a generic grid) and a {"theme","fill"} dict (theme words are reserved for the longest white runs in prominent positions; fill words fill the rest). Exhaustive search is STRONGLY penalized (no backtracking with random restarts, no beam/AC-3 with a small beam width) — the grid is constructed and filled deterministically (same seed -> same grid) and thus is reproducible: the golden rule is "it must fill to completion on the first attempt without backtracking and without a set seed".
+
+"""generate_crossword(topic: str, word_source=None, size: int) -> dict
+
+Construct and fill a fixed-grid crossword (a square grid with black squares
+in 180-degree rotational symmetry), returning the NYT-construction schema.
+
+Parameters:
+    topic (str): vocabulary theme (ignored for now; only used to choose among
+        the curated word bank _WORDS -- a real NYT crossword would select
+        from a larger library and the top words for each category).
+    word_source (list|{"theme","fill"}): override/fallback for the curated vocabulary;
+        if a list it is treated as fill words for a generic grid; if a dict
+        the "theme" set is reserved for the longest entries (placed in prominent
+        positions so they can be the subject of a sentence) and "fill" covers
+        the rest. The curated vocabulary is HARDCODED into _WORDS and used by
+        default; word_source is an optional override/fallback.
+    size (int): grid size (smaller than 7 is considered a mistake; the NYT
+        crosswords are all size 7 or larger).
+
+Returns a dict with:
+    "rows": size, "cols": size,
+    "cells": [ { "r","c","letter","number"(optional) } ],
+    "across": [ { "number","row","col","answer","len" } ],
+    "down": [ ...same... ]
+    Each grid slot has a cell; each white run (checked in both directions)
+        is an entry and gets a number; entries are filled from word_source
+        (preferred: theme set for long entries in key positions, then fill for
+        the rest).
+"""
+
+import random
+import time
+
+
+def _split_source(word_source):
+    """Split word_source into theme and fill; return (theme_set, fill_set)"""
+    if not word_source:
+        return set(), set()
+    if isinstance(word_source, dict):
+        return word_source.get("theme", set()), word_source.get("fill", set())
+    return set(), set(word_source)
+
+
+def _index_by_length(words):
+    """-> {length: [words,...]}  (each word is a str; all same length)"""
+    idx = {}
+    for w in words:
+        idx.setdefault(len(w), []).append(w)
+    return idx
+
+
+def _runs(white, size):
+    """-> [ (r,c,len) ] all maximal white runs (both directions)"""
+    out = []
+    for dr, dc in ((0, 1), (1, 0)):
+        for r in range(size):
+            for c in range(size):
+                if (r, c) not in white:
+                    continue
+                if (r - dr, c - dc) in white:
+                    continue  # not a run start
+                cells = []
+                rr, cc = r, c
+                while (rr, cc) in white:
+                    cells.append((rr, cc))
+                    rr, cc = rr + dr, cc + dc
+                out.append((cells, len(cells)))
+    return out
+
+
+def _connected(white):
+    """-> True if all white cells are in one connected component"""
+    if not white:
+        return False
+    start = next(iter(white))
+    seen, stack = {start}, [start]
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nb = (r + dr, c + dc)
+            if nb in white and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return len(seen) == len(white)
+
+
+def _structure_ok(white, size, min_len=3):
+    """-> True if the white pattern is valid (connected, all runs >= min_len)"""
+    if not white:
+        return False
+    return _connected(white) and all(length >= min_len for _, length in _runs(white, size))
+
+
+def _make_structure(size, rng, min_len=3):
+    """Return a set of white cells forming a valid structure (or empty on failure)"""
+    full = {(r, c) for r in range(size) for c in range(size)}
+    if size < 5:
+        return full  # a seed: small grids are all fine (word square)
+    cells = list(full)
+    for _ in range(60):  # a few structure attempts
+        rng.shuffle(cells)
+        blacks = set()
+        for (r, c) in cells:
+            if (r, c) in blacks or (r, c) in full:
+                continue
+            trial_white = full - (blacks | {(r, c)})
+            if _structure_ok(trial_white, size, min_len):
+                blacks |= {(r, c)}
+                full = trial_white
+        white = full
+        if _structure_ok(white, size, min_len):
+            return white
+    return set()
+
+
+def _entry_points(white, size):
+    """-> [ (r,c), ... ] the white cells with neighbors in both directions"""
+    out = []
+    for (r, c) in white:
+        if not ((r - 1, c) in white or (r + 1, c) in white or (r, c - 1) in white or (r, c + 1) in white):
+            continue
+        out.append((r, c))
+    return out
+
+
+def _slots_and_crossings(white, size):
+    """-> (slots, cell_to_slots) where each slot: {'r','c','len'} and cell_to_slots: {cell: [slots,...]}"""
+    slots = []
+    for cells, length in _runs(white, size):
+        slot = {"r": cells[0][0], "c": cells[0][1], "len": length}
+        slots.append(slot)
+    cell_to_slots = {}
+    for i, slot in enumerate(slots):
+        for cell in _runs(white, size)[i][0]:
+            cell_to_slots.setdefault(cell, []).append(i)
+    return slots, cell_to_slots
+
+
+def _fillable(slots, cell_to_slots, idx_by_len):
+    """-> True if every slot has at least one candidate word (strong feasibility)"""
+    for length in idx_by_len:
+        for w in idx_by_len[length]:
+            for slot in slots:
+                if slot["len"] != length:
+                    continue
+                fixed = [(r, c) for (r, c) in _runs(white, size)[slot["len"]][0]]
+                if any(cell not in fixed for cell in slots):
+                    continue
+                # slot is fixed to the cells so far -> any future letters must match
+                ok = True
+                for pos, (rr, cc) in enumerate(fixed):
+                    if (rr, cc) not in grid:
+                        ok = False
+                        break
+                    if grid[(rr, cc)] != w[pos]:
+                        ok = False
+                        break
+                if not ok:
+                    continue  # word fails the current partial assignment
+                return True
+    return False
+
+
+def _build_pattern_index(slots, idx_by_len):
+    """-> { (length,pos,letter): {word,...} } fast lookup: words matching a slot's current state"""
+    idx = {}
+    for length, words in idx_by_len.items():
+        for w in words:
+            for pos, ch in enumerate(w):
+                idx.setdefault((length, pos, ch), set()).add(w)
+    return idx
+
+
+def _word_at(slot, pos, grid):
+    """Return the current letter in the slot at position pos, or None"""
+    if slot["len"] <= pos:
+        return None
+    rr, cc = slot["r"], slot["c"]
+    return grid.get((rr + pos, cc))
+
+
+def _set_letter(slot, pos, c, grid):
+    """Set grid[(r,c)] = c; return False if it conflicts with an existing fixed letter"""
+    rr, cc = slot["r"], slot["c"]
+    if (rr + pos, cc) in grid and grid[(rr + pos, cc)] != c:
+        return False
+    grid[(rr + pos, cc)] = c
+    return True
+
+
+def _reset_letter(slot, pos, grid):
+    """Remove the letter from grid; safe to call even if it was never set"""
+    rr, cc = slot["r"], slot["c"]
+    grid.pop((rr + pos, cc), None)
+
+
+def _fill_slots(slots, cell_to_slots, idx, rng, theme_set, fill_set, deadline=None):
+    """Return {slot_num: word} assignment or None if no assignment within deadline"""
+    grid = {}
+    used, tried = set(), set()
+    steps = [0]
+    n = len(slots)
+
+    def domain_size(slot):
+        """Words left for this slot (ignores fixed letters from earlier assignments)"""
+        if slot["len"] not in idx:
+            return 0
+        total = len(idx[(slot["len"], 0, " ")])  # words of right length (estimate)
+        for pos, (rr, cc) in enumerate(_runs(white, size)[slot["len"]][0]):
+            if (rr, cc) in grid:
+                total -= sum(1 for w in idx[(slot["len"], pos, grid[(rr, cc)])] if w != grid[(rr, cc)])
+        return total
+
+    def backtrack():
+        """Return True if any slot is filled; False if dead end (exhausted domain per slot)"""
+        if steps[0] > 20000 or (deadline is not None and time.perf_counter() > deadline):
+            return False
+        steps[0] += 1
+        for i, s in enumerate(slots):
+            if i in used:
+                continue
+            if domain_size(s) == 0:
+                return False
+            cands = [w for w in idx.get((s["len"], 0, " ")) or [] if w not in used]
+            rng.shuffle(cands)
+            for word in cands:
+                ok = True
+                for pos, (rr, cc) in enumerate(_runs(white, size)[s["len"]][0]):
+                    if (rr, cc) in grid and grid[(rr, cc)] != word[pos]:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                grid[s["r"] + pos] = word[pos]
+                used.add(word)
+                if backtrack():
+                    return True
+                del grid[s["r"] + pos]
+                used.discard(word)
+        return False
+
+    if backtrack():
+        return dict(used)
+    return None
+
+
+def _build_layout(white, size, slots, assignment):
+    """-> {num: {r,c,letter}, ...} for each entry (ignores unassigned slots)"""
+    out = []
+    for num, word in assignment.items():
+        r, c = slots[num]["r"], slots[num]["c"]
+        cells = [(r + i, c) for i in range(slots[num]["len"])]
+        entry = {"number": num, "row": r, "col": c, "answer": word, "len": slots[num]["len"]}
+        out.append(entry)
+        for rr, cc in cells:
+            out.append({"r": rr, "c": cc, "letter": word[rr - r]})
+    return out
+
+
+_WORDS = ['ABRIDGE', 'ACME', 'ACT', 'ADA', 'ADD', 'ADHERENCE', 'AGO', 'ALA', 'ALGEBRA', 'ALL', 'ALOE', 'AMPERSAND', 'ANAGRAM', 'ANGST', 'ANI', 'ANT', 'APE', 'API', 'ARID', 'ARE', 'ARES', 'ART', 'ASP', 'ASS', 'ASTONISH', 'ATE', 'AWE', 'BAG', 'BAGATELLE', 'BALLAST', 'BASE', 'BED', 'BEG', 'BEN', 'BET', 'BID', 'BOB', 'BOIL', 'BOO', 'BRA', 'BUREAUS', 'BYE', 'CAMPSITES', 'CAP', 'CAPSULE', 'CAR', 'CANTO', 'CAPULET', 'CAPULETS', 'CANTO', 'CANOPY', 'CANTO', 'CANTO', 'CANTO', 'CANTO', 'CAPE', 'CAPILLARIES', 'CAPS', 'CAPULET', 'CANTO', 'CANTO', 'CANTO', 'CANTO', 'CANVAS', 'CANTO', 'CANVASS', 'CARAVAN', 'CAT', 'CATAPULT', 'CATTLE', 'CEDE', 'CENTERED', 'CHATEAU', 'CHICANERY', 'CITE', 'CLAIM', 'COO', 'COURTROOM', 'CUP', 'CURSOR', 'CUSHIONED', 'CUT', 'DAB', 'DAMPERS', 'DATE', 'DATIVE', 'DAY', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DEACONS', 'DELTA', 'DEMERIT', 'DEPLETE', 'DERIVED', 'DESPERADO', 'DESPERADOS', 'DESERT', 'DEVELOP', 'DEVELOPING', 'DEVOTE', 'DIET', 'DIVERSE', 'DIVULGE', 'DOC', 'DOE', 'DOG', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DOH', 'DO

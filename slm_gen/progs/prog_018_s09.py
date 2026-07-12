@@ -1,0 +1,233 @@
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: From a plain-language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) >= 3 letters;
+# every white cell checked in BOTH directions; all white cells connected; every
+# entry a real word taken from word_source; high white-square density; completes
+# within a few seconds.
+# word_source is provided on runtime: "random" (a seeded random library), "google" (scrambled real words), or "oecd" (OECDS vocabulary). Self-contained: avoid urllib, os, etc. word_source is passed in and assumed to be a pre-loaded list, so this program need do NONE of word fetching, preprocessing, or normalization.
+
+"""gen3 fusion: beam search + AC3 constraint propagation + longest-slot-first ordering.
+Longest-slot-first: consider longest white runs first when packing words; each
+assignment is made from the top-scoring candidate (highest current-score
+neighbor-count) and the longest word among the rest. This packs the longest
+words where they cause the most future constraints (a greedy version of beam
+search with backtracking), while the AC3 propagation prunes invalid
+partial-fillings.
+"""
+
+import random
+import time
+
+
+def _runs(white, size):
+    out = []
+    for dr, dc in ((0, 1), (1, 0)):
+        for r in range(size):
+            for c in range(size):
+                if (r, c) not in white:
+                    continue
+                if (r - dr, c - dc) not in white:
+                    continue
+                cells = []
+                rr, cc = r, c
+                while (rr, cc) in white:
+                    cells.append((rr, cc))
+                    rr, cc = rr + dr, cc + dc
+                out.append((cells, len(cells)))
+    return out
+
+
+def _connected(white):
+    if not white:
+        return False
+    start = next(iter(white))
+    seen, stack = {start}, [start]
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nb = (r + dr, c + dc)
+            if nb in white and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return len(seen) == len(white)
+
+
+def _structure_ok(white, size, min_len=3):
+    if not white:
+        return False
+    if any(length < min_len for _, length in _runs(white, size)):
+        return False
+    return _connected(white)
+
+
+def _make_structure(size, rng, min_len=3):
+    full = {(r, c) for r in range(size) for c in range(size)}
+    if size <= 5:
+        return full
+    cells = list(full)
+    for _ in range(60):
+        rng.shuffle(cells)
+        blacks = set()
+        target = (size * size) // 6
+        for (r, c) in cells:
+            if len(blacks) >= target:
+                break
+            partner = (size - 1 - r, size - 1 - c)
+            if (r, c) == partner or (r, c) in blacks or partner in blacks:
+                continue
+            if _structure_ok(full - (blacks | {(r, c), partner}), size, min_len):
+                blacks |= {(r, c), partner}
+        white = full - blacks
+        if _structure_ok(white, size, min_len):
+            return white
+    return full
+
+
+def _slots_and_crossings(white, size):
+    slots = [{"cells": cells, "len": length} for cells, length in _runs(white, size)]
+    cell_to_slots = {}
+    for i, s in enumerate(slots):
+        for cell in s["cells"]:
+            cell_to_slots.setdefault(cell, []).append(i)
+    return slots, cell_to_slots
+
+
+def _fill(slots, cell_to_slots, word_source, rng, budget=20000, deadline=None):
+    n = len(slots)
+    if not slots:
+        return {}
+    rng.shuffle(slots)
+    slots.sort(key=lambda s: s["len"], reverse=True)
+
+    def neighbors(slot):
+        return {si for si in range(n) if len(cell_to_slots[slot["cells"][0]]) > 1}
+
+    cellmap = {}
+    for i, s in enumerate(slots):
+        cellmap[s["cells"][0]] = i
+    cellmap_inv = {v: k for k, v in cellmap.items()}
+    cells = list(cellmap.keys())
+    rng.shuffle(cells)
+    cells.sort(key=lambda cell: len(cell_to_slots[cell]))
+
+    def is_fixed(cell):
+        return cell not in cellmap
+
+    domain = {si: set(word_source) for si in range(n)}
+    for si, s in enumerate(slots):
+        domain[si] &= {w for w in domain[si] if len(w) == s["len"]}
+
+    def revise(d, x, y):
+        avail = {w for w in d[y] if w[x] != " "}
+        if not avail:
+            return False
+        d[x] = avail
+        return True
+
+    def ac3(d):
+        queue = [pair for pair in d.keys()]
+        while queue:
+            if deadline is not None and time.perf_counter() > deadline:
+                return False
+            x, y = queue.pop()
+            if revise(d, x, y):
+                if not d[x]:
+                    return False
+                queue.extend([pair for pair in d.keys() if pair != (x, y) and pair[0] == x])
+        return True
+
+    ac3(domain)
+    if not domain:
+        return {}
+
+    used, assign, steps = set(), {}, [0]
+
+    def bt(d):
+        if steps[0] > budget or (deadline is not None and time.perf_counter() > deadline):
+            return None
+        steps[0] += 1
+        if not d:
+            return assign.copy()
+        si = min(d.keys(), key=lambda si: (len(d[si]), -slots[si]["len"]))
+        cands = [w for w in d[si] if w not in used]
+        rng.shuffle(cands)
+        cands.sort(key=lambda w: w not in assign)
+        for w in cands:
+            if deadline is not None and time.perf_counter() > deadline:
+                return None
+            nd = d.copy()
+            nd[si] = {w}
+            if ac3(nd):
+                assign[si] = w
+                used.add(w)
+                r = bt(nd)
+                if r is not None:
+                    return r
+                del assign[si]
+                used.discard(w)
+        return None
+
+    return bt(domain)
+
+
+def _build_layout(white, size, slots, assignment):
+    grid = {}
+    for si, word in assignment.items():
+        for pos, (r, c) in enumerate(slots[si]["cells"]):
+            grid[(r, c)] = word[pos]
+
+    def is_white(r, c):
+        return (r, c) in grid
+
+    numbers, num = {}, 0
+    across, down = [], []
+    for r in range(size):
+        for c in range(size):
+            if not is_white(r, c):
+                continue
+            sa = (r, c - 1) in grid and (r, c + 1) in grid
+            sd = (r - 1, c) in grid and (r + 1, c) in grid
+            if sa or sd:
+                num += 1
+                numbers[(r, c)] = num
+            if sa:
+                w, cc = "", c
+                while cc < size and (r, cc) in grid:
+                    w += grid[(r, cc)]
+                    cc += 1
+                across.append({"number": num, "row": r, "col": c, "answer": w, "len": len(w)})
+            if sd:
+                w, rr = "", r
+                while rr < size and (rr, c) in grid:
+                    w += grid[(rr, c)]
+                    rr += 1
+                down.append({"number": num, "row": r, "col": c, "answer": w, "len": len(w)})
+    cells = []
+    for (r, c), ch in grid.items():
+        cell = {"r": r, "c": c, "letter": ch}
+        if (r, c) in numbers:
+            cell["number"] = numbers[(r, c)]
+        cells.append(cell)
+    return {"rows": size, "cols": size, "cells": cells, "across": across, "down": down}
+
+
+def generate_crossword(topic: str, word_source, size: int) -> dict:
+    word_source = [str(w).upper() for w in word_source if str(w).isalpha()]
+    rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
+    for _ in range(200):
+        deadline = time.perf_counter() + 6.0
+        if deadline < time.perf_counter():
+            break
+        white = _make_structure(size, rng)
+        slots, cell_to_slots = _slots_and_crossings(white, size)
+        assignment = _fill(slots, cell_to_slots, word_source, rng, budget=20000, deadline=deadline)
+        if assignment and len(assignment) == len(slots):
+            return _build_layout(white, size, slots, assignment)
+    return {"rows": size, "cols": size, "cells": [], "across": [], "down": []}

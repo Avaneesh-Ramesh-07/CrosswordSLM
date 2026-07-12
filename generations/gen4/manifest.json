@@ -1,0 +1,180 @@
+{
+  "gen": 4,
+  "programs": [
+    {
+      "name": "mrv_fc_pidx",
+      "sizes": [7, 9, 11],
+      "heuristics": ["MRV", "forward_check", "pattern_index"],
+      "parents": ["reference_v1", "csp_ac3"],
+      "notes": "fusion: MRV + forward-checking + pattern-index (built ONCE, reused across structures) + per-size deadline + capped candidates; sizes 9/11 use pre-verified fillable templates. The core palette-scaling fix."
+    },
+    {
+      "name": "theme_lcv",
+      "sizes": [7, 9, 11],
+      "heuristics": ["theme_first", "LCV", "MRV", "pattern_index"],
+      "parents": ["reference_v1", "49ac1e73"],
+      "notes": "fusion: theme-first seating into longest slots + MRV + least-constraining-value ordering + pattern-index (built once) + templates at 9/11."
+    },
+    {
+      "name": "ac3_mrv",
+      "sizes": [7, 9, 11],
+      "heuristics": ["AC3", "MAC", "MRV", "pattern_index"],
+      "parents": ["csp_ac3", "602461b0"],
+      "notes": "fusion: AC-3 preprocessing + maintained arc consistency (trail-based undo) + MRV over bounded domains + pattern-index (built once) + templates at 9/11."
+    },
+    {
+      "name": "reference_v1",
+      "sizes": [7, 9, 11],
+      "heuristics": ["MRV", "forward_check", "pattern_index"],
+      "parents": [],
+      "notes": "base seed: reliability baseline (random symmetric construction)"
+    },
+    {
+      "name": "csp_ac3",
+      "sizes": [7, 9, 11],
+      "heuristics": ["AC3", "MAC", "MRV"],
+      "parents": [],
+      "notes": "base seed: CSP backtracking maintaining arc consistency (family 2)"
+    },
+    {
+      "name": "beam_search",
+      "sizes": [7, 9, 11],
+      "heuristics": ["beam", "MRV"],
+      "parents": [],
+      "notes": "base seed: beam search, no backtracking, most-constrained-first (family 3)"
+    },
+    {
+      "name": "vocab_first",
+      "sizes": [7, 9, 11],
+      "heuristics": ["theme_first", "forward_check"],
+      "parents": [],
+      "notes": "base teacher: vocab-first fill that maximizes coverage"
+    },
+    {
+      "name": "template_ac3",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC"],
+      "parents": [],
+      "notes": "base teacher: pre-verified 11x11 grid templates + AC-3 fill (family 4)"
+    },
+    {
+      "name": "49ac1e73",
+      "sizes": [7, 9],
+      "heuristics": ["AC3", "MAC", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: AC-3/MAC + theme-first + longest-slot-first on random construction"
+    },
+    {
+      "name": "602461b0",
+      "sizes": [7, 9],
+      "heuristics": ["AC3", "MAC", "MRV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: AC-3/MAC with MRV selection + theme-first value ordering"
+    },
+    {
+      "name": "b7d295c4",
+      "sizes": [7, 9],
+      "heuristics": ["AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: AC-3/MAC + MRV + true least-constraining-value ordering, theme-first primary"
+    },
+    {
+      "name": "c6e4dfd0",
+      "sizes": [7, 9],
+      "heuristics": ["MRV", "forward_check", "pattern_index", "greedy_restart", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: MRV + forward-checking + pattern index + random restarts + theme-first value ordering"
+    },
+    {
+      "name": "e782e38e",
+      "sizes": [7, 9],
+      "heuristics": ["MRV", "forward_check", "pattern_index"],
+      "parents": [],
+      "notes": "verified seed: reference_v1 core (MRV + forward-checking + pattern index)"
+    },
+    {
+      "name": "78576fea",
+      "sizes": [7],
+      "heuristics": ["AC3", "MAC"],
+      "parents": [],
+      "notes": "verified seed: CSP backtracking maintaining arc consistency (family 2)"
+    },
+    {
+      "name": "9d257ebb",
+      "sizes": [7],
+      "heuristics": ["theme_first", "forward_check"],
+      "parents": [],
+      "notes": "verified seed: vocab-first fill maximizing coverage"
+    },
+    {
+      "name": "b77d7932",
+      "sizes": [7],
+      "heuristics": ["beam", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: beam search + theme-weighted scoring"
+    },
+    {
+      "name": "b9bc8460",
+      "sizes": [7],
+      "heuristics": ["beam", "MRV"],
+      "parents": [],
+      "notes": "verified seed: beam search, most-constrained-first (family 3)"
+    },
+    {
+      "name": "0ed22740",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (sparse_first selection)"
+    },
+    {
+      "name": "2e0e8341",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (shuffle selection)"
+    },
+    {
+      "name": "53366856",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (fixed selection)"
+    },
+    {
+      "name": "60b4e128",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (shuffle selection)"
+    },
+    {
+      "name": "77271ddf",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (full 46-template pool)"
+    },
+    {
+      "name": "96444393",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (compact_first selection)"
+    },
+    {
+      "name": "a2c51b46",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (odd-subset selection)"
+    },
+    {
+      "name": "d26925d0",
+      "sizes": [11],
+      "heuristics": ["template", "AC3", "MAC", "MRV", "LCV", "theme_first"],
+      "parents": [],
+      "notes": "verified seed: 11x11 templates + ac3_lcv fill (firsthalf selection)"
+    }
+  ]
+}

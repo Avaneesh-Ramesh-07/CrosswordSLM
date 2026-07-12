@@ -125,7 +125,7 @@ construction+fill algorithm, constrained to the curated word list.
   degenerate fills with little interlock, or non-word *crossings* that break validity
   without making every entry fake).
 
-### EVAL 1 — English clean-room fleet (50 independent Opus agents, 2026-07-08)
+### EVAL 1 — English clean-room fleet (50 independent Opus agents, 2026-07-10)
 
 50 independent `claude-opus-4-8` generations (temperature 1.0) under the clean-room
 contract, run in the **fair default timing condition**: the prompt has **no "return
@@ -165,46 +165,120 @@ raise the large grids (11×11 3→2, 15×15 0→0) and small grids stayed in the
 the differences are sampling noise. The big-grid collapse is a genuine capability limit, not
 "not fast enough."
 
-### EVAL 2 — Held-out `eval.jsonl` deployment prompt, run as-is (100 Opus agents, 2026-07-09)
+### EVAL 1 (rerun) — the deployed harness-emphasis prompt (50 Opus agents, 2026-07-11)
+
+To keep the base-vs-tuned comparison fair, Claude was re-run on the **exact prompt the tuned model
+is now trained on** (shared verbatim by the enhanced non-hardcoded SFT dataset and this eval via
+`pipeline/contract_prompt.py`). Two changes from the original EVAL 1 contract above: (a) the
+**symmetry requirement was dropped** (the scorer never gated on it), and (b) the function-name
+requirement is now **explicit** — *"the main function in your code MUST BE `def
+generate_crossword(topic: str, word_source, size: int) -> dict`; this is the only one that works
+with our testing harness."* Otherwise identical: 50 fresh `claude-opus-4-8` generations,
+temperature 1.0, 60 s runner, scored on `WORD_LIST_FULLY_PURIFIED` at 7/9/11/15 (n = 50 per size,
+200 scored). Parse rate **100%**.
+
+| size | valid% | fullyOK% | within% | dictOK% |
+|---|---|---|---|---|
+| 7×7 | 6 | 6 | 4 | 10 |
+| 9×9 | 10 | 10 | 6 | 14 |
+| 11×11 | 0 | 0 | 0 | 2 |
+| 15×15 | 0 | 0 | 0 | 0 |
+| **all** | **4** | **4** | **~2** | **6** |
+
+- **The prompt change did not move Claude's ceiling: ~4% valid overall — statistically identical to
+  the original EVAL 1's ~5%** (per-size 6 / 10 / 0 / 0 vs 6 / 12 / 2 / 0, all within n=50 sampling
+  noise). Stating the harness requirement explicitly and dropping symmetry cleaned up the contract
+  but did **not** help Claude build the grid; **construction + fill remains the bottleneck**, and the
+  large grids still collapse to ~0%.
+- This is the **apples-to-apples base-Claude line** the tuned model is measured against, since the
+  tuned model trains on this identical prompt (`data/sft_non_hardcoded_enhanced`).
+- Result file: `runs/eval/fleet_fully_purified_v2.json`.
+
+### EVAL 2 — Held-out `eval.jsonl` deployment prompt, run as-is (75 Opus agents, 25 each at 7/9/11, 2026-07-09)
 
 The base-vs-tuned comparator. EVAL 1 uses our clean-room contract (an explicit word list);
 **this eval uses the actual held-out `eval.jsonl` deployment prompt** — the bare user
 message the tuned SLM will receive in production. And to remove any "the 0% is just an API/format mismatch"
-objection, we **ran each of the 100 emitted programs as-is on its own interface**
+objection, we **ran each of the 75 emitted programs as-is on its own interface**
 (`python <program>`) and judged the crossword it actually printed — **no contract
 conformance required**.
 
-Scored through the harness (bare prompt, n=100, 25 per size): **0/100 valid at every
+Scored through the harness (bare prompt, n=75, 25 per size at 7/9/11): **0/75 valid at every
 size.** Run **as-is on their own terms**:
 
 | outcome | share | detail |
 |---|---|---|
-| **No crossword produced** ("unfillable") | **54%** | 32 crash (exception); 14 run but report **no solution** (their own solver can't fill their own grid); 7 print no grid; 1 hangs |
-| **Printed a filled grid — but invalid** | **46%** | every one fails validity (below) |
+| **No crossword produced** ("unfillable") | **55%** | 28 crash (exception); 6 run but report **no solution** (their own solver can't fill their own grid); 6 print no grid; 1 hangs |
+| **Printed a filled grid — but invalid** | **45%** | every one fails validity (below) |
 | **Valid crossword** | **0%** | — |
 
-Of the 46 filled grids, **32 were analyzable**; the other 14 print box-drawing borders +
+Of the 34 filled grids, **23 were analyzable**; the other 11 print box-drawing borders +
 row-number gutters that the matrix parser can't structure (the *code ran fine* — an
 output-format limitation; spot-checks show the same failures). The produced grids average
-**47% black squares** (a real crossword is ~16%) and split into two failure modes — Opus
+**40% black squares** (a real crossword is ~16%) and split into two failure modes — Opus
 can't escape the dilemma:
 
 - **A — real crossword density (≤35% black): 10 grids → 10/10 have non-word crossings.**
   Attempt a properly dense, interlocked grid and the perpendicular runs come out as
   gibberish (`EOQUYCITY`, `BEVXGE`, `CNCL`, misspelled `PIUDENT`).
-- **B — degenerate / sparse (>35% black, mean 55%): 22 grids.** These reach "all real
+- **B — degenerate / sparse (>35% black, mean 50%): 13 grids.** These reach "all real
   words" only by making ~half the grid black — isolated words with almost no interlock.
   Real words, but not a crossword.
 - **0 achieve dense *and* all-real-word** (the functional definition of valid).
 
-Across the produced grids, **155 / 478 (32%) of all placed across/down runs are not real
-dictionary words**; among grids with any faulty crossing, on average **39%** of that
+Across the produced grids, **108 / 343 (31%) of all placed across/down runs are not real
+dictionary words**; among grids with any faulty crossing, on average **35%** of that
 grid's runs are non-words.
 
 **So the 0% is a genuine capability failure, not an API artifact.** On their own terms,
-unaugmented Opus programs either can't fill the grid at all (54%), fill a dense grid with
+unaugmented Opus programs either can't fill the grid at all (55%), fill a dense grid with
 gibberish crossings (mode A), or reach real words only by going ~half-black and
 non-interlocking (mode B).
+
+### EVAL 3 — Size-specific clean-room prompt (50 Opus agents each at 7/9/11, n=150, 2026-07-11)
+
+The matched base-vs-tuned baseline. EVAL 3 combines EVAL 1's clean-room contract (the model is
+*handed* the `word_source` and told "use ONLY these words") with a concrete, size-named request —
+**the exact size-specific prompt the tuned SLM now trains and is evaluated on**: *"Write Python code
+to generate a {N}x{N}, fixed-grid, American-style crossword…"*. 50 independent Opus agents per size
+at 7/9/11 (`claude-opus-4-8`, temperature 1.0), each program scored **at its own size** on the full
+`WORD_LIST_FULLY_PURIFIED` palette (24,542 words) through the identical harness as EVAL 1.
+
+| size | valid% | fullyOK% | within% | dictOK% |
+|---|---|---|---|---|
+| 7×7 | 0 | 0 | 0 | 0 |
+| 9×9 | 0 | 0 | 0 | 0 |
+| 11×11 | 0 | 0 | 0 | 0 |
+| **all** | **0** | **0** | **0** | **0** |
+
+**0 / 150 valid** — 100% parse rate (every agent emitted runnable code), so the failure is not code
+quality, it's **termination**: at the default 60 s execution budget every one of the 150 programs
+times out without returning a grid (0 coverage, 0 crossings, 0 placed entries).
+
+**Does more execution time rescue them? No.** Re-running all 150 saved programs at a **5× budget
+(300 s)** gives the identical result — **0 / 150 valid**:
+
+| size | timeout (ran the full 300 s) | empty / crash (< 0.5 s) | valid |
+|---|---|---|---|
+| 7×7 | 50 | 0 | 0 |
+| 9×9 | 47 | 3 | 0 |
+| 11×11 | 43 | 7 | 0 |
+
+140 / 150 run the **entire 300 s** and are killed *still searching*; the only 10 that stop early do so
+in ~0.1–0.5 s by returning an **empty grid or crashing** — they give up instantly, they do not finish.
+There is no "correct-but-slow" middle: a naive CSP/backtracking fill cannot search a 24.5k-word
+palette to completion, so 5 minutes just hits the same exponential wall 5× later. (Confirmed not a
+harness artifact — the *same* scoring path scores the pipeline's own generators 83–100% valid.)
+
+This is the decisive contrast with the tuned SLM's training data: our `works_too_long` generators
+**do** finish when handed more search time (correct-but-slow), and the palette-scaled gen4/gen5
+fusions finish *inside* the budget. Unaugmented Opus, handed the same words and a concrete size, has
+neither property — it is **0% at 60 s and 0% at 300 s**. Because EVAL 3 uses the identical
+size-specific prompt the tuned model receives at inference, it is the true apples-to-apples baseline:
+**the base model the fine-tune must beat scores 0%.**
+
+- Result files: `runs/eval/eval3.json` (60 s harness run); `runs/eval/_eval3_slow.log` (300 s
+  re-score). Emitted programs saved verbatim under `runs/eval/fleet_progs_eval3/`.
 
 ### Comparator — the verified pipeline through the *same* harness
 
@@ -291,7 +365,7 @@ Two honest caveats:
   produces valid, clean, in-budget generators at high pass@1. That turns the anecdote
   into the project's headline evidence.
 
-## Prompt for these 100 Claude instances:
+## EVAL 1 Prompt:
 
 System message:
 

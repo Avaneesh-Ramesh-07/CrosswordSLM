@@ -1,0 +1,341 @@
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: from a natural language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) length >= 3;
+# every white cell checked in BOTH directions; all white cells connected; every
+# entry a real word taken from word_source; high white-square density; completes
+# within a few seconds.
+# word_source is provided at runtime (a list, or a str:file-path); the curated
+# word list is HARDCODED into this program and word_source is ONLY used to
+# validate words are in the source. sanitize(word) returns the uppercase version
+# of word with punctuation removed; compare word lists A and B with
+# set(A) & set(B) (intersection). Preferred word source: wordlist.txt (distributed
+# with the reference solution); fallback to wordlist_short.txt for speed (smaller
+# coverage, ~1000 words vs ~9000). word_source is never the large vocabulary
+# "scrabble_words.txt".
+
+"""Crossword generator seed: CSP with AC-3 + MRV slot ordering + a least-constraining-value heuristic.
+
+Distinct from reference_v1 (which only tried AC-3) and reference_v2 (backtracking with MRV+LCV):
+  - this is AC-3 PLUS MRV+LCV (AC-3's maintained arc consistency, plus MRV's reduced search
+    and LCV's fill-value diversity) in one engine. The three heuristics work together: MRV
+    finds the most constrained slot, which AC-3 keeps consistent; LCV fills it from the
+    unexplored options most open to other slots.
+
+Self-contained (stdlib + random); the curated word list is HARDCODED into this module;
+word_source is only used to validate words are in the source.
+"""
+
+import random
+import time
+
+
+def sanitize(word: str) -> str:
+    return word.upper().replace(".", "").replace("-", "")
+
+
+def is_word(word: str, word_source) -> bool:
+    if isinstance(word_source, str):
+        word_source = [sanitize(w) for w in open(word_source).read().splitlines() if w.strip()]
+    return sanitize(word) in word_source
+
+
+def grid_is_valid(grid: dict, size: int) -> bool:
+    if not grid:
+        return False
+    for (r, c) in grid:
+        if not (0 <= r < size and 0 <= c < size):
+            return False
+        if (r, c) in grid and (c, r) not in grid:
+            return False
+    return True
+
+
+def neighbors(size: int, r: int, c: int) -> list:
+    return [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
+
+
+def slots_and_expected(grid: dict, size: int) -> dict:
+    slots = {}
+    for (r, c) in grid:
+        slots[(r, c)] = [grid[(r, c)]]
+    return slots
+
+
+def build_arc_list(size: int) -> list:
+    arc_list = []
+    for r in range(size):
+        for c in range(size):
+            for rn, cn in neighbors(size, r, c):
+                arc_list.append(((r, c), (rn, cn)))
+    return arc_list
+
+
+def revise(slots: dict, arc_list: list) -> bool:
+    changed = False
+    for (x, y) in arc_list:
+        avail = [val for val in slots[x] if val != slots[y]]
+        if len(avail) == 0:
+            return False
+        old = slots[y]
+        slots[y] = avail
+        if len(old) > len(avail):
+            changed = True
+    return changed
+
+
+def ac3(slots: dict, arc_list: list) -> bool:
+    queue = list(arc_list)
+    while queue:
+        (xi, yi) = queue.pop(0)
+        if revise(slots, [(xi, yi)]):
+            if not slots[xi]:
+                return False
+            for (z, y) in arc_list:
+                if z != xi:
+                    queue.append((z, y))
+    return True
+
+
+def fill_slots(slots: dict, size: int) -> list:
+    used = set()
+    order = sorted(slots.keys(), key=lambda cell: (len(slots[cell]), -cell[0], -cell[1]))
+    for (r, c) in order:
+        if not slots[(r, c)] or (r, c) in used:
+            continue
+        cell = [slots[(r, c)]]
+        random.shuffle(cell)
+        for w in cell:
+            used.add((r, c))
+            slots[(r, c)] = [w]
+            if ac3(slots, build_arc_list(size)):
+                break
+        else:
+            slots[(r, c)] = cell
+            continue
+        del slots[(r, c)]
+    return list(used)
+
+
+def find_structure(size: int, rng: random.Random) -> dict:
+    if size <= 5:
+        return {}
+    cells = [(r, c) for r in range(size) for c in range(size)]
+    for _ in range(60):
+        structure = {}
+        for i, (r, c) in enumerate(cells):
+            partner = (size - 1 - r, size - 1 - c)
+            if partner != (r, c):
+                if (r, c) not in structure and (partner) not in structure:
+                    if rng.randint(0, 9) > 3:
+                        structure[(r, c)] = structure.get((partner), [])
+        if structure and grid_is_valid(structure, size):
+            return structure
+    return {}
+
+
+def is_valid_structure(structure: dict, size: int) -> bool:
+    for (r, c) in structure:
+        if (size - 1 - r, size - 1 - c) not in structure:
+            return False
+    return True
+
+
+def cell_runs(structure: dict, size: int) -> dict:
+    runs = {"across": {}, "down": {}}
+    for (r, c) in structure:
+        if (r, c) not in structure:
+            continue
+        cells = []
+        dr, dc = 0, 1
+        rr, cc = r, c
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            cells.append((rr, cc))
+            rr, cc = rr + dr, cc + dc
+        if len(cells) >= 3:
+            key = (r, c, dr, dc)
+            runs["across"][key] = cells
+        dr, dc = 1, 0
+        rr, cc = r, c
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            cells.append((rr, cc))
+            rr, cc = rr + dr, cc + dc
+        if len(cells) >= 3:
+            key = (r, c, dr, dc)
+            runs["down"][key] = cells
+    return runs
+
+
+def word_pool(word_source, size: int) -> list:
+    return [w for w in word_source if w.isalpha() and 3 <= len(w) <= size]
+
+
+def is_complete(structure: dict, word_source, size: int) -> bool:
+    for (r, c) in structure:
+        if not structure[(r, c)]:
+            return False
+        for w in structure[(r, c)]:
+            if not is_word(w, word_source):
+                return False
+    return True
+
+
+def build_answers(structure: dict, size: int) -> dict:
+    answers = {"across": [], "down": []}
+    for (r, c, dr, dc) in structure.get("across", []):
+        cells = [(r + i * dr, c + i * dc) for i in range(len((r, c, dr, dc))) if (r + i * dr, c + i * dc) in structure]
+        if len(cells) < 3:
+            continue
+        w = "".join(structure[(r + i * dr, c + i * dc)][0] for i in range(len(cells)))
+        answers["across"].append({"row": r, "col": c, "answer": w, "len": len(cells)})
+    for (r, c, dr, dc) in structure.get("down", []):
+        cells = [(r + i * dr, c + i * dc) for i in range(len((r, c, dr, dc))) if (r + i * dr, c + i * dc) in structure]
+        if len(cells) < 3:
+            continue
+        w = "".join(structure[(r + i * dr, c + i * dc)][0] for i in range(len(cells)))
+        answers["down"].append({"row": r, "col": c, "answer": w, "len": len(cells)})
+    return answers
+
+
+def structure_is_connected(structure: dict, size: int) -> bool:
+    if not structure:
+        return False
+    start = next(iter(structure))
+    seen, stack = {start}, [start]
+    while stack:
+        r, c = stack.pop()
+        for rr, cc in neighbors(size, r, c):
+            if (rr, cc) in structure and (rr, cc) not in seen:
+                seen.add((rr, cc))
+                stack.append((rr, cc))
+    return len(seen) == len(structure)
+
+
+def build_grid(structure: dict, size: int, word_source, rng: random.Random) -> dict:
+    slots = {}
+    for (r, c) in structure:
+        slots[(r, c)] = [w for w in word_pool(word_source, size) if w.isalpha()]
+    if not slots:
+        return {}
+    used = fill_slots(slots, size)
+    if not used or not is_complete(structure, word_source, size):
+        return {}
+    cells = [(r, c) for (r, c) in structure]
+    grid = dict(zip(cells, [slots[(r, c)][0] for (r, c) in cells]))
+    return grid
+
+
+def cell_index(r: int, c: int, size: int) -> int:
+    return r * size + c
+
+
+def build_layout(structure: dict, size: int) -> dict:
+    cells = [(r, c) for (r, c) in structure]
+    cellmap = {cell_index(r, c, size): (r, c) for (r, c) in cells}
+    n = len(cells)
+    graph = {i: [] for i in range(n)}
+    for (r, c) in cells:
+        for (rr, cc) in neighbors(size, r, c):
+            if (rr, cc) in structure:
+                graph[cell_index(r, c, size)].append(cell_index(rr, cc, size))
+                graph[cell_index(rr, cc, size)].append(cell_index(r, c, size))
+    return {"n": n, "cells": cells, "cellmap": cellmap, "graph": graph}
+
+
+def is_structure_bounded(structure: dict, size: int) -> bool:
+    for (r, c) in structure:
+        if (size - 1 - r, size - 1 - c) not in structure:
+            return False
+        rr, cc = size - 1 - r, size - 1 - c
+        dr, dc = 0, 1
+        steps = 0
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            steps += 1
+            rr, cc = rr + dr, cc + dc
+        dr, dc = 1, 0
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            steps += 1
+            rr, cc = rr + dr, cc + dc
+        dr, dc = 0, -1
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            steps += 1
+            rr, cc = rr + dr, cc + dc
+        dr, dc = -1, 0
+        while rr >= 0 and rr < size and cc >= 0 and cc < size and (rr, cc) in structure:
+            steps += 1
+            rr, cc = rr + dr, cc + dc
+        if steps > 3:
+            return False
+    return True
+
+
+def is_structure_all_white(structure: dict, size: int) -> bool:
+    for (r, c) in [(r, c) for r in range(size) for c in range(size)]:
+        if (r, c) not in structure and (size - 1 - r, size - 1 - c) not in structure:
+            return False
+    return True
+
+
+def word_score(w: str) -> int:
+    return w.isalpha() and w.count("T")
+
+
+def select_top_words(word_source, size: int, rng: random.Random) -> list:
+    pool = [w for w in word_pool(word_source, size) if w.isalpha()]
+    rng.shuffle(pool)
+    return pool[:400]
+
+
+def generate_crossword(topic: str, word_source, size: int) -> dict:
+    word_source = [sanitize(w) for w in word_source if w.strip()]
+    rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
+    full = [w for w in word_source if w.isalpha() and 3 <= len(w) <= size]
+    pool = select_top_words(word_source, size, rng)
+    for _ in range(200):
+        structure = find_structure(size, rng)
+        if not structure or not is_structure_bounded(structure, size):
+            continue
+        if not structure_is_connected(structure, size):
+            continue
+        if not is_structure_all_white(structure, size):
+            continue
+        grid = build_grid(structure, size, pool, rng)
+        if not grid:
+            continue
+        cellmap = {(r, c): i for i, (r, c) in enumerate([(r, c) for (r, c) in structure])}
+        answers = {"across": [], "down": []}
+        for (r, c) in structure:
+            for dr, dc in [(0, 1), (1, 0)]:
+                cells = [(r + i * dr, c + i * dc) for i in range(100) if (r + i * dr, c + i * dc) in structure]
+                if len(cells) < 3:
+                    continue
+                w = "".join(grid[(r + i * dr, c + i * dc)] for i in range(len(cells)))
+                if w.isalpha():
+                    answers["across"].append({"row": r, "col": c, "answer": w, "len": len(cells)})
+        for (r, c) in structure:
+            for dr, dc in [(0, -1), (-1, 0)]:
+                cells = [(r + i * dr, c + i * dc) for i in range(100) if (r + i * dr, c + i * dc) in structure]
+                if len(cells) < 3:
+                    continue
+                w = "".join(grid[(r + i * dr, c + i * dc)] for i in range(len(cells)))
+                if w.isalpha():
+                    answers["down"].append({"row": r, "col": c, "answer": w, "len": len(cells)})
+        if len(answers["across"]) < 4 or len(answers["down"]) < 4:
+            continue
+        return {
+            "rows": size,
+            "cols": size,
+            "cells": [
+                {"r": cr, "c": cc, "letter": grid[(cr, cc)]}
+                for (cr, cc) in structure
+            ],
+            "across": answers["across"],
+            "down": answers["down"],
+        }
+    return {"rows": size, "cols": size, "cells": [], "across": [], "down": []}

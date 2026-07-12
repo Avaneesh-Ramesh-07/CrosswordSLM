@@ -1,0 +1,215 @@
+```python
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: from a natural language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) length >= 3
+# letters; all white cells checked in BOTH directions; every white cell checked
+# by exactly one across and one down entry; all white runs of length exactly n
+# form exactly one entry (so each entry is in exactly one across and one down);
+# high white-square density; completes within a few seconds.
+# word_source is provided on runtime (a list, word_source[f]."word", length word_source[f].length);
+# topic is "themepark" for now (so the crossword will be thematically connected);
+# generate_crossword() must be written exactly -- the harness supplies the rest.
+# ========================================================================
+
+# Standard library imports
+import random
+import time
+
+# Third-party imports (the harness substitutes them at runtime)
+# word_source is passed in from the caller; the template leaves it out here
+# so the minimal library is public and the word_source contract is enforced
+
+
+def _runs(white, size):
+    out = []
+    for dr, dc in ((0, 1), (1, 0)):
+        for r in range(size):
+            for c in range(size):
+                if (r, c) not in white or (r - dr, c - dc) in white:
+                    continue
+                cells = []
+                rr, cc = r, c
+                while (rr, cc) in white:
+                    cells.append((rr, cc))
+                    rr, cc = rr + dr, cc + dc
+                out.append((cells, len(cells)))
+    return out
+
+
+def _entry_cells(cells):
+    return set(cells)
+
+
+def _intersection(a, b):
+    return a & b
+
+
+def _shared_cells(white):
+    out = []
+    for cells1, length1 in _runs(white, 7):
+        for cells2, length2 in _runs(white, 7):
+            if cells1 != cells2 and _intersection(cells1, cells2):
+                out.append((cells1, cells2))
+    return out
+
+
+def _layout_ok(white, size, min_len=3):
+    if not white:
+        return False
+    if any(length < min_len for _, length in _runs(white, size)):
+        return False
+    return all((r, c) not in white for r in range(size) for c in range(size) if (r - 1, c) not in white or (r, c - 1) not in white)
+
+
+def _is_symmetric(white, size):
+    for r in range(size):
+        for c in range(size):
+            if (r, c) in white and (size - 1 - r, size - 1 - c) not in white:
+                return False
+            if (r, c) not in white and (size - 1 - r, size - 1 - c) in white:
+                return False
+    return True
+
+
+def _make_layout(size, rng, min_len=3):
+    full = {(r, c) for r in range(size) for c in range(size)}
+    if size <= 5:
+        return full
+    cells = list(full)
+    for _ in range(60):
+        rng.shuffle(cells)
+        blacks = set()
+        target = (size * size) // 6
+        for (r, c) in cells:
+            if len(blacks) >= target:
+                break
+            partner = (size - 1 - r, size - 1 - c)
+            if (r, c) == partner or (r, c) in blacks or partner in blacks:
+                continue
+            trial = full - (blacks | {(r, c), partner})
+            if _layout_ok(trial, size, min_len):
+                blacks |= {(r, c), partner}
+        white = full - blacks
+        if _layout_ok(white, size, min_len):
+            return white
+    return full
+
+
+def _slots_and_answers(white, size, word_source):
+    slots = []
+    for cells, length in _runs(white, size):
+        slots.append({"cells": cells, "len": length})
+    answers = {si["len"]: [] for si in slots}
+    for si in slots:
+        for word in word_source:
+            if word.length != si["len"]:
+                continue
+            ok = True
+            for rr, cc in si["cells"]:
+                if word[cc] != " " and word[rr] != " ":
+                    ok = False
+                    break
+            if not ok:
+                continue
+            wordlist = list(word)
+            for rr, cc in si["cells"]:
+                wordlist[cc] = " "
+            if " " not in wordlist:
+                continue
+            w = "".join(wordlist).split(" ")
+            answers[si["len"]].append(w)
+    return slots, answers
+
+
+def _fill(slots, answers, rng, budget=200000):
+    used, assigned = set(), {}
+    steps = [0]
+
+    def backtrack():
+        if steps[0] > budget:
+            return False
+        steps[0] += 1
+        if len(assigned) == len(slots):
+            return True
+        si = min(slots, key=lambda s: (s["len"] in used, s not in assigned))
+        if si["len"] in used:
+            return backtrack()
+        cands = answers[si["len"]]
+        for w in rng.choices(cands, k=200):
+            ww = w.split(" ")
+            for u in ww:
+                if not u:
+                    continue
+                if u in used:
+                    break
+                used.add(u)
+                assigned[si] = u
+                if backtrack():
+                    return True
+                del assigned[si]
+                used.discard(u)
+        return False
+
+    return assigned if backtrack() else None
+
+
+def _build_layout(white, size, slots, assignment):
+    grid = {}
+    for si, word in assignment.items():
+        for rr, cc in si["cells"]:
+            grid[(rr, cc)] = word[cc]
+    cells = []
+    for (r, c) in grid:
+        cell = {"r": r, "c": c, "letter": grid[(r, c)]}
+        cells.append(cell)
+    ac3, dn3 = [], []
+    for si, word in assignment.items():
+        cells_si = set(si["cells"])
+        dr, dc = 0, 1
+        for (rr, cc) in cells_si:
+            if rr - dr not in range(size) or cc - dc not in range(size):
+                dr, dc = 1, 0
+                break
+        for (rr, cc) in cells_si:
+            if (rr - dr, cc - dc) not in cells_si:
+                continue
+            entries = [e for e in ac3 + dn3 if e["cells"] == cells_si]
+            assert len(entries) < 2
+            if entries:
+                continue
+            cells_cross = [e for e in ac3 + dn3 if (rr, cc) in e["cells"]]
+            assert len(cells_cross) < 2
+            if not cells_cross:
+                ac3.append({"cells": cells_si, "row": rr, "col": cc, "answer": word, "len": si["len"]})
+            else:
+                dn3.append({"cells": cells_si, "row": rr, "col": cc, "answer": word, "len": si["len"]})
+    ac3.sort(key=lambda x: x["row"] * 100 + x["col"])
+    dn3.sort(key=lambda x: x["row"] * 100 + x["col"])
+    return {"rows": size, "cols": size, "cells": cells, "across": ac3, "down": dn3}
+
+
+def generate_crossword(topic: str = "themepark", word_source, size: int = 7) -> dict:
+    rng = random.Random(hash((topic, size)) & 0xFFFFFFFF)
+    if not word_source or not isinstance(word_source, list):
+        return {"rows": size, "cols": size, "cells": [], "across": [], "down": []}
+    word_source = [w for w in word_source if w.length >= 3]
+    for _ in range(200):
+        white = _make_layout(size, rng)
+        if not _layout_ok(white, size, 3):
+            continue
+        if not _is_symmetric(white, size):
+            continue
+        slots, answers = _slots_and_answers(white, size, word_source)
+        assignment = _fill(slots, answers, rng)
+        if not assignment:
+            continue
+        return _build_layout(white, size, slots, assignment)
+    return {"rows": size, "cols": size, "cells": [], "across": [], "down": []}
+```

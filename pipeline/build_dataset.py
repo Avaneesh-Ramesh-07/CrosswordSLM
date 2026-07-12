@@ -10,9 +10,13 @@ of the trained turns); splits are written to separate files.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
+import re
+
+from pipeline.contract_prompt import SYSTEM, USER_CONTRACT, user_contract
 
 # ALL the task knowledge lives in the SYSTEM turn (fixed), so the USER turn can be a
 # short natural request ("create a 7x7 crossword about vocabulary") and the model
@@ -43,8 +47,10 @@ _CONTRACT = (
     "words where the crossings allow."
 )
 
-# Minimal system prompt: the model must succeed from the bare user request alone.
-SYSTEM = "You are an expert Python programmer."
+# SYSTEM and the full task contract now come from pipeline/contract_prompt.py, so the SFT
+# targets are trained on exactly the prompt used for the Claude EVAL 1 fleet. (The old
+# _CONTRACT / CONTRACT_COMMENT below are retained only so regeneration can strip a legacy
+# comment header off previously-harvested programs.)
 
 
 def _contract_comment() -> str:
@@ -57,19 +63,64 @@ def _contract_comment() -> str:
 CONTRACT_COMMENT = _contract_comment()
 
 
+# Prose we do NOT want the tuned model to learn to emit. Verified (AST over the whole dataset)
+# that these tokens occur ONLY in docstrings/comments, never in executable code (the 180-deg logic
+# is arithmetic `(size-1-r, size-1-c)`; names are `_make_structure`/`_TEMPLATES`), so scrubbing them
+# is behavior-preserving. OpenEvolve/seed self-reference lines are dropped whole (they are pure
+# module-docstring prose); the 180-symmetry / NYT qualifiers are redacted in place.
+_DROP_TOKENS = ("openevolve", "seed for", "will evolve")
+_REDACT = [
+    (re.compile(r"\b180[-\s]degree(?:\s+rotational)?\s+symmetric?\b", re.I), ""),
+    (re.compile(r"\b180[-\s]?symmetric\b", re.I), ""),
+    (re.compile(r"\b180[-\s]degree\s+rotational\s+symmetry\b", re.I), ""),
+    (re.compile(r"\breal\s+NYT\b", re.I), "real"),
+    (re.compile(r"\bNYT[-\s]?(?:legal|ish|style)\b", re.I), ""),
+    (re.compile(r"\bNYT\b", re.I), ""),
+    (re.compile(r"\bsymmetric\b", re.I), ""),
+    (re.compile(r"\bsymmetry\b", re.I), ""),
+]
+
+
+def clean_program(code: str) -> str:
+    """Strip 180-symmetry / OpenEvolve-seed / NYT prose from a program's docstrings & comments,
+    leaving all executable code untouched. Returns the original unchanged if the scrub would break
+    parsing (guard) -- these tokens never occur in code, so that never fires in practice."""
+    out = []
+    for ln in code.split("\n"):
+        low = ln.lower()
+        if any(t in low for t in _DROP_TOKENS):
+            continue                                       # drop pure OpenEvolve/seed prose lines
+        new = ln
+        for rx, repl in _REDACT:
+            new = rx.sub(repl, new)
+        new = new.replace("(seed v1)", "(v1)").replace("seed v1", "v1")
+        if new != ln:                                      # tidy only edited (prose) lines; keep indentation
+            new = re.sub(r"\(\s*\)", "", new)              # empty parens left by a removed qualifier
+            new = re.sub(r"(?<=\S) {2,}", " ", new)        # collapse interior double-spaces (not the indent)
+            new = re.sub(r"\s+([;,.)])", r"\1", new)       # space before punctuation
+            new = new.rstrip()
+        out.append(new)
+    cleaned = "\n".join(out)
+    try:
+        ast.parse(cleaned)
+    except SyntaxError:
+        return code
+    return cleaned
+
+
 def assistant_content(code: str) -> str:
-    """The assistant turn = the contract as a COMMENT HEADER, then the program. Putting
-    the contract in the target (not the prompt) forces the knowledge into the weights,
-    so at inference the bare user request is enough (no system-prompt hints)."""
+    """The assistant turn = ONLY the fenced program (scrubbed of symmetry/OpenEvolve/NYT prose).
+    The task contract lives in the user prompt, so it is not duplicated as a comment header."""
     body = code.strip()
     # normalize the function signature to EXACTLY match the contract
     body = body.replace(
         "def generate_crossword(topic, word_source, size):",
         "def generate_crossword(topic: str, word_source, size: int) -> dict:",
     )
-    if body.startswith(CONTRACT_COMMENT):        # idempotent: don't double-prepend
-        return f"```python\n{body}\n```"
-    return f"```python\n{CONTRACT_COMMENT}\n\n{body}\n```"
+    # strip a legacy contract-comment header if a previously-harvested program still carries one
+    if body.startswith(CONTRACT_COMMENT):
+        body = body[len(CONTRACT_COMMENT):].lstrip("\n")
+    return f"```python\n{clean_program(body)}\n```"
 
 # Natural phrasings so the model generalizes over wording. The topic is ALWAYS
 # "vocabulary" -- this is a vocabulary crossword generator, and the crossword content
@@ -85,12 +136,10 @@ _USER_TEMPLATES = [
 
 
 def render_user_prompt(effective_spec: dict) -> str:
-    """The short, natural user request -- ALWAYS about vocabulary, only the size
-    varies. All rules live in SYSTEM; the model infers the technique."""
+    """The user request is the SIZE-SPECIFIC task contract for THIS record's grid size, so the
+    model learns 'NxN prompt -> a generator for that size' (matches the EVAL 3 baseline)."""
     size = (effective_spec or {}).get("size", 7)
-    sid = str((effective_spec or {}).get("spec_id", ""))
-    i = int(hashlib.md5(sid.encode()).hexdigest(), 16) % len(_USER_TEMPLATES)
-    return _USER_TEMPLATES[i].format(s=size)
+    return user_contract(size)
 
 
 def to_chat(row: dict) -> dict:

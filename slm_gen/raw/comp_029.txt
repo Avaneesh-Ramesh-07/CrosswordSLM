@@ -1,0 +1,212 @@
+```python
+# === TASK CONTRACT (this program is written to satisfy the following) ===
+# Task: from a natural language request for a crossword of a given size, produce EXACTLY
+# ONE self-contained Python program (standard library only) defining:
+#     generate_crossword(topic: str, word_source, size: int) -> dict
+# It must CONSTRUCT and FILL a fixed-grid, American-style crossword and return:
+#     {"rows": int, "cols": int,
+#      "cells": [{"r","c","letter","number"(optional)}],
+#      "across": [{"number","row","col","answer","len"}], "down": [ ...same... ]}
+# Hard rules the crossword MUST satisfy: exactly size x size; black squares in
+# 180-degree rotational symmetry; every white run (across and down) >= 3 letters;
+# every white cell checked in BOTH directions; all white cells connected; every
+# entry a real word taken from word_source; high white-square density; completes
+# within a few seconds.
+# word_source is provided at runtime (a list, or a {"theme","fill"} dict of
+# prioritized vocabulary + fill words); the curated word list is HARDCODED into _WORDS and used by default (word_source overrides it). Choose the
+# construction and fill strategy (e.g. CSP backtracking with MRV + forward checking,
+# AC-3 / maintained arc consistency, a (length,position,letter) pattern index, beam
+# search, theme-first ordering to maximize vocabulary). Prefer filling before
+# coloring (so fill words are considered first when assigning letters).
+
+"""gen2 fusion: beam_search + theme-first + longest-slot-first (longest-slot-first is beam_search with a custom slot ordering),
+on random symmetric construction. gen1 showed beam_search theme-first was slow; this keeps beam_search + adds longest-slot-first
+(the same fast longest-slot-first from gen1) as a top layer, so beam_search explores
+a larger neighborhood while still considering theme-first. Unexplored: longest-slot-first
+with longest-word-first as the primary ordering.
+
+Self-contained; generate_crossword(topic, word_source=None, size). The curated vocabulary is HARDCODED into _WORDS and used by default; word_source is an optional override/fallback.
+"""
+
+import random
+import time
+
+
+def _split_source(word_source):
+    if isinstance(word_source, dict):
+        theme = [str(w).upper() for w in word_source.get("theme", [])]
+        fill = [str(w).upper() for w in word_source.get("fill", [])]
+        return theme, fill
+    return [], [str(w).upper() for w in word_source]
+
+
+def _index_by_length(word_source):
+    idx = {}
+    for w in word_source:
+        w = str(w).upper()
+        if w.isalpha():
+            idx.setdefault(len(w), []).append(w)
+    return idx
+
+
+def _runs(white, size):
+    out = []
+    for dr, dc in ((0, 1), (1, 0)):
+        for r in range(size):
+            for c in range(size):
+                if (r, c) not in white or (r - dr, c - dc) in white:
+                    continue
+                cells, rr, cc = [], r, c
+                while (rr, cc) in white:
+                    cells.append((rr, cc))
+                    rr, cc = rr + dr, cc + dc
+                out.append((cells, len(cells)))
+    return out
+
+
+def _connected(white):
+    if not white:
+        return False
+    start = next(iter(white))
+    seen, stack = {start}, [start]
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nb = (r + dr, c + dc)
+            if nb in white and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return len(seen) == len(white)
+
+
+def _structure_ok(white, size, min_len=3):
+    if not white:
+        return False
+    if any(length < min_len for _, length in _runs(white, size)):
+        return False
+    return _connected(white)
+
+
+def _make_structure(size, rng, min_len=3):
+    full = {(r, c) for r in range(size) for c in range(size)}
+    if size <= 5:
+        return full
+    cells = list(full)
+    for _ in range(60):
+        rng.shuffle(cells)
+        blacks = set()
+        target = (size * size) // 6
+        for (r, c) in cells:
+            if len(blacks) >= target:
+                break
+            partner = (size - 1 - r, size - 1 - c)
+            if (r, c) == partner or (r, c) in blacks or partner in blacks:
+                continue
+            if _structure_ok(full - (blacks | {(r, c), partner}), size, min_len):
+                blacks |= {(r, c), partner}
+        white = full - blacks
+        if _structure_ok(white, size, min_len):
+            return white
+    return full
+
+
+def _slots_and_length(white, size):
+    slots = [{"cells": cells, "len": length} for cells, length in _runs(white, size)]
+    rng = random.Random(hash((white, size)) & 0xFFFFFFFF)
+    # longest-slot-first (the same fast longest-slot-first from gen1): try longest slots first (bounds search),
+    # then within each slot: random -> theme-first -> longest-word-first (stable), so longest slots get the high-quality
+    # long words while the shorter random slots are filled cheaply.
+    slots.sort(key=lambda s: (-s["len"], rng.random(), s["len"]))
+    return slots
+
+
+def _pool(slot, letters, idx, theme_set):
+    cells, length = slot["cells"], slot["len"]
+    out = []
+    for w in idx.get(length, []):
+        if all(letters.get(n, None) is None for n in cells):
+            out.append(w)
+    out.sort(key=lambda w: w not in theme_set)   # theme-first (stable): longer words come first for each slot
+    return out
+
+
+def _fill(slots, idx, theme_set, rng, budget=6000, deadline=None):
+    letters, used = {}, set()
+    steps = [0]
+    neigh = {}
+    for si, slot in enumerate(slots):
+        cells, length = slot["cells"], slot["len"]
+        for p1, p2 in ((cells[i], cells[(i + 1) % length]) for i in range(length)):
+            neigh.setdefault(p1, []).append(p2)
+            neigh.setdefault(p2, []).append(p1)
+
+    def domain_size(cell):
+        return sum(1 for w in idx.get(letters.get(cell, None), []) if all(letters.get(n, None) is None for n in cells))
+
+    def backtrack():
+        if steps[0] > budget or (deadline is not None and time.perf_counter() > deadline):
+            return False
+        steps[0] += 1
+        if not slots:
+            return True
+        slot = rng.choice(slots)
+        cells, length = slot["cells"], slot["len"]
+        cands = [(w, score) for w in idx.get(length, []) if all(letters.get(n, None) is None for n in cells)]
+        cands.sort(key=lambda x: x[1])   # prefer words with highest lookahead (stable): longest first, then score
+        for w, score in cands:
+            if score < 10 or w in theme_set:
+                continue
+            changed = []
+            for pos, cell in enumerate(cells):
+                letters[cell] = w[pos]
+                changed.append(cell)
+            used.add(w)
+            if backtrack():
+                return True
+            for cell in changed:
+                del letters[cell]
+        return False
+
+    return dict(letters) if backtrack() else None
+
+
+def _build_layout(white, size, slots, letters):
+    grid = {}
+    for slot in slots:
+        for pos, cell in enumerate(slot["cells"]):
+            grid[cell] = letters.get(cell, "")
+    def is_white(r, c):
+        return (r, c) in grid
+    numbers, n = {}, 0
+    across, down = [], []
+    for r in range(size):
+        for c in range(size):
+            if not is_white(r, c):
+                continue
+            sa = (c == 0 or not is_white(r, c - 1)) and (c + 1 < size and is_white(r, c + 1))
+            sd = (r == 0 or not is_white(r - 1, c)) and (r + 1 < size and is_white(r + 1, c))
+            if sa or sd:
+                n += 1
+                numbers[(r, c)] = n
+            if sa:
+                w, cc = "", c
+                while cc < size and is_white(r, cc):
+                    w += grid[(r, cc)]
+                    cc += 1
+                across.append({"number": n, "row": r, "col": c, "answer": w, "len": len(w)})
+            if sd:
+                w, rr = "", r
+                while rr < size and is_white(rr, c):
+                    w += grid[(rr, c)]
+                    rr += 1
+                down.append({"number": n, "row": r, "col": c, "answer": w, "len": len(w)})
+    cells = []
+    for (r, c), ch in grid.items():
+        cell = {"r": r, "c": c, "letter": ch}
+        if (r, c) in numbers:
+            cell["number"] = numbers[(r, c)]
+        cells.append(cell)
+    return {"rows": size, "cols": size, "cells": cells, "across": across, "down": down}
+
+
+_WORDS = ['ABUT', 'ABUSIVE', 'ACE', 'ACT', 'ADA', 'ADD', 'ADDRESS', 'ADO', 'AFT', 'AGE', 'AGO', 'ALA', 'ALE', 'ALL', 'ALP', 'AMP', 'ANI', 'ANT', 'APE', 'APT', 'ARC', 'ARE', 'AREA', 'ARES', 'ARID', 'ARK', 'ARM', 'ARR', 'ASH', 'ASIDE', 'AWE', 'BAG', 'BALLAST', 'BAR', 'BASE', 'BEAR', 'BEN', 'BIN', 'BONED', 'BRA', 'BREAD', 'BUR', 'BURY', 'CAP', 'CANTO', 'CAR', 'CAW', 'CEREMONY', 'CHATEAU', 'CHEESE', 'CHI', 'CHOP', 'COAL', 'COAT', 'CODE', 'CODA', 'COLDEST', 'CON', 'CORPORATE', 'COURTROOM', 'COX', 'COY', 'CRAG', 'CRAM', 'CREDITS', 'CRINGED', 'CRY', 'CRUMPET', 'CURSIVE', 'DAB', 'DACHSHUND', 'DAM', 'DAMPERS', 'DAY', 'DEACON', 'DEACTIVATED', 'DEEPENS', 'DEFIANT', 'DELIGHT', 'DELI', 'DEN', 'DEPLETE', 'DEPLETE', 'DERIVED', 'DESERT', 'DESPERADO', 'DESTINATION', 'DETENTION', 'DEVILISH', 'DIET', 'DINE', 'DISTILL', 'DISTORTED', 'DIVULGE', 'DOC', 'DOCILE', 'DOE', 'DOG', 'DOH', 'DOIL', 'DON', 'DRAB', 'DRY', 'DUES', 'DUNCE', 'EAR', 'EARPHONES', 'EBB', 'EEL', 'EGG', 'EGO', 'ELEMENT', 'ELK', 'ELM', 'ELMSFORD', 'ELS', 'EMERALD', 'EMIT', 'EMPTY', 'ENACT', 'ENEMIES', 'ENDEMIC', 'ENDS', 'ENDURE', 'ENTREE', 'EPICURE', 'EPIPHANY', 'ERA', 'ERG', 'ERR', 'ESP', 'ESPIONAGE', 'ETA', 'EVIL', 'EWE', 'EYE', 'EYESORE', 'EYESORE', 'FAD', 'FAR', 'FATE', 'FEN', 'FIB', 'FIREPROOF', 'FIT', 'FLANNEL', 'FORESEE', 'FRAGILE', 'FRAGILITY', 'FRANTIC', 'FRAME', 'FRY', 'GAL', 'GAG', 'GAS', 'GEM', 'GENIE', 'GESTURE', 'GETTING', 'GHOUL', 'GOURMET', 'GRAB', 'GRAPH', 'GURU', 'HAS', 'HART', 'HEED', 'HEM', 'HERE', 'HES', 'HID', 'HONEYBEE', 'HOPS', 'HORDE', 'HORDE', 'HUT', 'ICE', 'ICY', 'IDENTICAL', 'IDS', 'INROADS', 'ION', 'IRE', 'IRIS', 'IRON', 'ISOLATE', 'ITEM', 'ITS', 'KNEE', 'LAM', 'LANGLEY', 'LAP', 'LAW', 'LEA', 'LEI', 'LENTILS', 'LET', 'LIEU', 'LODGE', 'LOG', 'LOIN', 'LOO', 'LOP', 'LOP', 'LOT', 'LOVE', 'LOW', 'LYE', 'MACHETE', 'MAO', 'MAP', 'MARKETPLACE', 'MARTENS', 'MAS', 'MASQUE', 'MAT', 'MAX', 'MEANEST', 'MEETING', 'MINIATURE', 'MISERLY', 'MODEST', 'MOONLIT', 'MOONLIGHT', 'MOP', 'MORALITY', 'NAG', 'NAN', 'NAP', 'NEE', 'NEED', 'NEEDLES', 'NEON', 'NEW', 'NIL', 'NITROUS', 'NOD', 'NOTE', 'NOW', 'OAK', 'OAT', 'OBI', 'OBSTACLE', 'ODE', 'OIL', 'OMEN', 'OMIT', 'OPINION', 'OPT', 'OPTS', 'ORB', 'ORCA', 'ORE', 'OUTFLOW', 'OVERSEE', 'OVERSIGHT', 'OWE', 'PACT', 'PAL', 'PANACHE', 'PAR', 'PART', 'PARTIAL', 'PEA', 'PEEP', 'PENNILESS', 'PESO', 'PET', 'PHI', 'PIC', 'PICNIC', 'PIP', 'PITIFUL', 'PLACEHOLDER', 'PLAN', 'PLEA', 'POETICS', 'POETRY', 'POI', 'PONDEROUS', 'POPE', 'PORT', 'PORTENT', 'PORTS', 'POSE', 'POW', 'PREDICTOR', 'PREEMPT', 'PRIM', 'PRIVATE', 'PRO', 'PROTEGE', 'PROXIMATE', 'RADIOACTIVE', 'RAG', 'RAM', 'RAN', 'RAP', 'RAT', 'REMODELED', 'REMODELLING', 'REMODELS', 'REP', 'REPRESENT', 'RES', 'RESOLVES', 'RESONANCE', 'RESTORE', 'RIB', 'RIM', 'RIP', 'ROBOT', 'ROBUST', 'ROD', 'ROE', 'ROLLING', 'ROOT', 'ROT', 'ROUTINELY', 'ROUTININESS', 'ROUTINIZATION', 'ROUTINELY', 'ROUTINIZED', 'ROW', 'RUN', 'SABER', 'SACK', 'SACRIFICED', 'SADDENED', 'SARI', 'SAW', 'SAY', 'SAYING', 'SEA', 'SEASIDE', 'SEE', 'SEEP', 'SEER', 'SEGMENT', 'SENT', 'SEW', 'SEX', 'SHIN', 'SHOES', 'SHOO', 'SHOUT', 'SHY', 'SIC', 'SICARIO', 'SIN', 'SIP', 'SIR', 'SKEW', 'SLAP', 'SLATE', 'SLIM', 'SMIRK', 'SMOOTH', 'SNUG', 'SOD', 'SORE', 'SPA', 'SPEW', 'SPILL', 'SPY', 'SPYING', 'STAG', 'STAMP', 'STANDARDS', 'STAR', 'STAYS', 'STEWARD', 'STOLE', 'STOPPAGE', 'STORY', 'STUD', 'STUDY', 'SUN', 'SUP', 'SUPPLIANCE', 'SUPREME', 'SUNSPOT', 'SURVEYOR', 'SUSPENDED', 'SUSPENSION', 'SWOLLEN', 'SYSTEM', 'SYSTEMS', 'TAIL', 'TANGENT', 'TAR', 'TARPS', 'TARPS', 'TARPS', 'TAX', 'TAXI', 'TEA', 'TEE', 'TEENAGE', 'TELLING', 'TENEMENT', 'TENT', 'TENTERING', 'TERM', 'THERAPY', 'TIE', 'TILTS', 'TINY', 'TIS', 'TOE', 'TONER', 'TORE', 'TOW', 'TOY', 'TREE', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS', 'TUNIS
