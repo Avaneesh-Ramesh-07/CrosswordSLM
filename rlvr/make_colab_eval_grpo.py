@@ -54,7 +54,8 @@ ADAPTERS = {
     # "sft": f"{CKPT}/qwen3-4b-crossword-qlora-hardcoded",
 }
 SIZES          = (7, 9, 11)   # 15 is slow (long template fills); add if you want
-SAMPLES        = 2            # completions per prompt
+SAMPLES        = 20           # completions per prompt -> stable valid-RATE (12 prompts x 20 = 240)
+GEN_BATCH      = 10           # generate this many at once (chunked, to bound KV memory); lower if OOM
 TEMPERATURE    = 0.7
 MAX_NEW_TOKENS = 4096         # programs are ~3-4k tokens; don't truncate
 for name, path in ADAPTERS.items():
@@ -87,12 +88,19 @@ def load(adapter_dir):
     return model, tok
 
 @torch.no_grad()
-def generate(model, tok, messages, n, temp, max_new):
+def generate(model, tok, messages, n, temp, max_new, chunk=10):
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inp = tok(text, return_tensors="pt").to(model.device)
-    out = model.generate(**inp, do_sample=temp > 0, temperature=max(temp, 1e-5), top_p=0.95,
-                         num_return_sequences=n, max_new_tokens=max_new, pad_token_id=tok.pad_token_id)
-    return [tok.decode(g[inp["input_ids"].shape[1]:], skip_special_tokens=True) for g in out]'''),
+    plen = inp["input_ids"].shape[1]
+    outs, remaining = [], n
+    while remaining > 0:                       # chunk num_return_sequences to bound KV memory
+        k = min(chunk, remaining)
+        gen = model.generate(**inp, do_sample=temp > 0, temperature=max(temp, 1e-5), top_p=0.95,
+                             repetition_penalty=1.1, no_repeat_ngram_size=4,   # break _WORDS-list loops
+                             num_return_sequences=k, max_new_tokens=max_new, pad_token_id=tok.pad_token_id)
+        outs += [tok.decode(g[plen:], skip_special_tokens=True) for g in gen]
+        remaining -= k
+    return outs'''),
 
  (MD, "## 6. Run the eval (generate -> verifier-score every sample)"),
  (CO, r'''import gc, time
@@ -102,7 +110,7 @@ for name, adapter in ADAPTERS.items():
     model, tok = load(adapter)
     recs, t0 = [], time.time()
     for i, p in enumerate(prompts):
-        comps = generate(model, tok, p["prompt"], SAMPLES, TEMPERATURE, MAX_NEW_TOKENS)
+        comps = generate(model, tok, p["prompt"], SAMPLES, TEMPERATURE, MAX_NEW_TOKENS, GEN_BATCH)
         for c in comps:
             r = evaluate_text(c, p["size"], get_palette(), cfg)
             r["pid"] = i
