@@ -122,12 +122,14 @@ cells = [
       '        print(f"  generated {min(i + BATCH, len(pairs))}/{len(pairs)}", flush=True)\n'
       '    return outs'),
 
- (MD, "## 6. Generate on the size-specific prompt, score through the harness\n"
-      "For each size in **7/9/11**, build the exact prompt the model was trained on "
-      "(`SYSTEM` + `user_contract(size)`) and sample `PER_SIZE` fresh programs at `GEN_TEMP`. Each is "
-      "scored by `score_one` on the purified palette with a real-dictionary check on every entry — "
-      "identical to Claude EVAL 3. `GEN_TIMEOUT = 60 s` gives each emitted program the same execution "
-      "budget as EVAL 3 (so `valid%` credits slow-but-correct grids)."),
+ (MD, "## 6. Generate on the prompt, score through the harness\n"
+      "For each size in **7/9/11**, build the prompt and sample `PER_SIZE` fresh programs at `GEN_TEMP`, "
+      "then score each with `score_one` on the purified palette (real-dictionary check on every entry). "
+      "**`BARE_PROMPT` toggle** (set at the top of the cell): `False` uses the size-specific **contract** "
+      "prompt the model trained on (matches Claude **EVAL 3** / the T2 condition); `True` uses the **bare "
+      "`eval.jsonl` deployment prompt** — *\"Create a NxN vocabulary crossword…\"* with no contract or "
+      "schema (the EVAL 2-style condition). The model is unchanged; only the prompt differs. "
+      "`GEN_TIMEOUT = 60 s` gives each emitted program the same execution budget as the Claude evals."),
  (CO, 'import os, json, time\n'
       '# eval_opus_fleet reads ANTHROPIC_* at import; set dummies so nothing complains (no API calls here)\n'
       'os.environ.setdefault("ANTHROPIC_BASE_URL", ""); os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", "")\n'
@@ -139,9 +141,29 @@ cells = [
       'PER_SIZE = 25            # samples per size at GEN_TEMP; 25 x 3 = 75 total\n'
       'F.GEN_TIMEOUT = 60       # match EVAL 3: up to 60 s execution per emitted program\n'
       'pal = purified_palette() # WORD_LIST_FULLY_PURIFIED (24,542 words) -- the EVAL 3 condition\n\n'
-      '# every record of a size shares the identical size-specific prompt, so build it directly + sample fresh\n'
-      'prompts = [(SYSTEM, user_contract(s), s) for s in SIZES for _ in range(PER_SIZE)]\n'
-      'print(f"{len(prompts)} prompts ({PER_SIZE}/size {SIZES})")\n'
+      '# --- PROMPT STYLE TOGGLE --------------------------------------------------------------------\n'
+      '# False (default): the size-specific CONTRACT prompt the model was trained on -> matches Claude\n'
+      '#                  EVAL 3 (the T2 condition).\n'
+      '# True:            the BARE eval.jsonl deployment prompt ("Create a NxN vocabulary crossword ...",\n'
+      '#                  NO contract, NO schema, NO word list) -> the harder EVAL 2-style condition\n'
+      '#                  (what Claude EVAL 2 / the T1 eval used). SAME model either way; only the\n'
+      '#                  prompt changes, so this measures how well the tuning generalizes off-contract.\n'
+      'BARE_PROMPT  = False\n'
+      '_BARE_SYSTEM = "You are an expert Python programmer."\n'
+      '_BARE_TEMPLATES = [   # the five eval.jsonl phrasings (data/sft/eval.jsonl), verbatim\n'
+      '    "I need a {N}x{N} fixed-grid crossword for practicing vocabulary (non-free-form).",\n'
+      '    "Generate a {N}x{N} fixed-grid crossword to teach vocabulary (not free-form).",\n'
+      '    "Make a {N}x{N} non-free-form vocabulary crossword.",\n'
+      '    "Create a {N}x{N} fixed-grid (non-free-form) crossword about vocabulary.",\n'
+      '    "Build me a {N}x{N} vocabulary crossword on a fixed grid, not free-form.",\n'
+      ']\n'
+      'def _make_prompt(s, i):\n'
+      '    if BARE_PROMPT:   # cycle the phrasings, like the held-out eval.jsonl distribution\n'
+      '        return (_BARE_SYSTEM, _BARE_TEMPLATES[i % len(_BARE_TEMPLATES)].replace("{N}", str(s)), s)\n'
+      '    return (SYSTEM, user_contract(s), s)\n'
+      'STYLE = "bare eval.jsonl" if BARE_PROMPT else "size-specific contract"\n\n'
+      'prompts = [_make_prompt(s, i) for s in SIZES for i in range(PER_SIZE)]\n'
+      'print(f"{len(prompts)} prompts ({PER_SIZE}/size {SIZES}) | style: {STYLE}")\n'
       'print("  example user prompt:", prompts[0][1].splitlines()[0])\n\n'
       'print("generating...", flush=True)\n'
       'comps = generate_batch([(s, u) for (s, u, sz) in prompts])\n\n'
@@ -157,7 +179,7 @@ cells = [
       '    rec["size"] = sz; rows.append(rec)\n\n'
       'parse_rate = sum(r["parsed"] for r in rows) / len(rows)\n'
       'print(f"\\nparse rate (emitted a code block): {parse_rate*100:.0f}%")\n'
-      'ov = table(f"TUNED Qwen3-4B (non-hardcoded SFT), size-specific prompt, purified "\n'
+      'ov = table(f"TUNED Qwen3-4B (non-hardcoded SFT), {STYLE} prompt, purified "\n'
       '           f"(n={len(rows)}, temp={GEN_TEMP})", rows, SIZES)'),
 
  (MD, "## 7. Save results + base-vs-tuned comparison"),
@@ -165,7 +187,7 @@ cells = [
       'os.makedirs("runs/eval", exist_ok=True)\n'
       'out = f"runs/eval/tuned_nonhardcoded_{int(time.time())}.json"\n'
       'summary = {"model": "qwen3-4b-crossword-qlora-merged (non-hardcoded SFT)",\n'
-      '           "condition": "size-specific contract prompt, purified palette",\n'
+      '           "condition": f"{STYLE} prompt, purified palette",\n'
       '           "n": len(rows), "parse_rate": parse_rate, "gen_temp": GEN_TEMP, "sizes": SIZES,\n'
       '           "overall": ov, "by_size": {s: agg([r for r in rows if r["size"] == s]) for s in SIZES}}\n'
       'json.dump(summary, open(out, "w", encoding="utf-8"), indent=2)\n'
